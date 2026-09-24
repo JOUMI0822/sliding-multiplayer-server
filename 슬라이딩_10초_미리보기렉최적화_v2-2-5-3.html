@@ -234,15 +234,13 @@ let gameState = "start";
 let multiplayerOpen = false;
 let multiplayerRole = null;
 let multiplayerRoomCode = "";
-let multiplayerHostToken = "";
-const MULTIPLAYER_HOST_STORAGE_KEY = "slidingMultiplayerHostRoom_v1";
 let multiplayerSeed = 0;
 let multiplayerOpponentName = "상대 플레이어";
 
 /* =========================================================
    2인용 서버 실제 연결
 ========================================================= */
-const MULTIPLAYER_SERVER_URL = "wss://sliding-multiplayer-server.onrender.com";
+const MULTIPLAYER_SERVER_URL = "wss://sliding-multiplayer-server-1.onrender.com";
 let multiplayerSocket = null;
 let multiplayerConnected = false;
 let multiplayerPeerJoined = false;
@@ -261,20 +259,6 @@ let opponent = {
 function multiplayerSend(data) {
     if (!multiplayerSocket || multiplayerSocket.readyState !== WebSocket.OPEN) return false;
     try { multiplayerSocket.send(JSON.stringify(data)); return true; } catch (error) { return false; }
-}
-
-function saveMultiplayerHostRoom() {
-    if (multiplayerRole !== "host" || !multiplayerRoomCode || !multiplayerHostToken) return;
-    try {
-        localStorage.setItem(MULTIPLAYER_HOST_STORAGE_KEY, JSON.stringify({
-            room: multiplayerRoomCode,
-            token: multiplayerHostToken
-        }));
-    } catch (error) {}
-}
-
-function clearMultiplayerHostRoom() {
-    try { localStorage.removeItem(MULTIPLAYER_HOST_STORAGE_KEY); } catch (error) {}
 }
 
 function closeMultiplayerSocket() {
@@ -359,23 +343,8 @@ function handleMultiplayerMessage(data) {
     }
     if (data.type === "roomCreated") {
         multiplayerRoomCode = String(data.room || multiplayerRoomCode);
-        multiplayerHostToken = String(data.hostToken || "");
-        saveMultiplayerHostRoom();
         multiplayerStatus = "방 생성 완료 · 친구를 기다리는 중";
         multiplayerPeerJoined = false;
-        updateUI();
-        return;
-    }
-    if (data.type === "reconnected") {
-        multiplayerRole = "host";
-        multiplayerRoomCode = String(data.room || multiplayerRoomCode);
-        multiplayerStatus = "방장으로 재접속했습니다. 상대 플레이어를 기다리는 중";
-        multiplayerOpen = true;
-        updateUI();
-        return;
-    }
-    if (data.type === "hostDisconnected") {
-        multiplayerStatus = "방장이 잠시 연결을 끊었습니다. 재접속을 기다리는 중";
         updateUI();
         return;
     }
@@ -500,16 +469,11 @@ function openMultiplayerMenu() {
 
 function closeMultiplayerMenu() {
     multiplayerOpen = false;
-    if (multiplayerRole === "host") clearMultiplayerHostRoom();
     multiplayerRole = null;
-    multiplayerHostToken = "";
-    multiplayerRoomCode = "";
     closeMultiplayerSocket();
 }
 
 function createMultiplayerRoom() {
-    clearMultiplayerHostRoom();
-    multiplayerHostToken = "";
     multiplayerRole = "host";
     multiplayerRoomCode = generateRoomCode();
     multiplayerSeed = generateMatchSeed();
@@ -8607,8 +8571,6 @@ function handleSettingsTap(x, y) {
                 return true;
             }
             if (isInsideRect(x, y, { x: 415, y: 345, w: 180, h: 48 })) {
-                clearMultiplayerHostRoom();
-                multiplayerHostToken = "";
                 multiplayerRoomCode = generateRoomCode();
                 multiplayerSeed = generateMatchSeed();
                 multiplayerPeerJoined = false;
@@ -9339,25 +9301,7 @@ function gameLoop(
    초기 실행
 ========================================================= */
 
-function autoReconnectMultiplayerHost() {
-    let saved = null;
-    try { saved = JSON.parse(localStorage.getItem(MULTIPLAYER_HOST_STORAGE_KEY) || "null"); } catch (error) {}
-    if (!saved || !saved.room || !saved.token) return;
-
-    multiplayerRole = "host";
-    multiplayerRoomCode = String(saved.room).toUpperCase();
-    multiplayerHostToken = String(saved.token);
-    multiplayerOpen = true;
-    multiplayerStatus = "방장으로 재접속 중...";
-    connectMultiplayerSocket(() => multiplayerSend({
-        type: "reconnect",
-        room: multiplayerRoomCode,
-        token: multiplayerHostToken
-    }));
-}
-
 updateUI();
-setTimeout(autoReconnectMultiplayerHost, 150);
 
 requestAnimationFrame(
     gameLoop
