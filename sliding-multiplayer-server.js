@@ -8,8 +8,6 @@ const HTML_FILE = path.join(__dirname, '슬라이딩_10초_미리보기렉최적
 const rooms = new Map();
 const clients = new Set();
 
-const HOST_RECONNECT_TIME = 5 * 60 * 1000;
-
 function wsAcceptKey(key) {
     return crypto.createHash('sha1')
         .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
@@ -52,6 +50,7 @@ function parseFrames(buffer) {
     while (offset + 2 <= buffer.length) {
         const b1 = buffer[offset];
         const b2 = buffer[offset + 1];
+
         const opcode = b1 & 0x0f;
         const masked = (b2 & 0x80) !== 0;
 
@@ -63,6 +62,7 @@ function parseFrames(buffer) {
 
             length = buffer.readUInt16BE(offset + 2);
             headerLength = 4;
+
         } else if (length === 127) {
             if (offset + 10 > buffer.length) break;
 
@@ -87,7 +87,9 @@ function parseFrames(buffer) {
             ? buffer.subarray(payloadStart, payloadStart + 4)
             : null;
 
-        if (masked) payloadStart += 4;
+        if (masked) {
+            payloadStart += 4;
+        }
 
         const payload = Buffer.from(
             buffer.subarray(payloadStart, payloadStart + length)
@@ -99,7 +101,11 @@ function parseFrames(buffer) {
             }
         }
 
-        messages.push({ opcode, payload });
+        messages.push({
+            opcode,
+            payload
+        });
+
         offset += frameLength;
     }
 
@@ -128,8 +134,6 @@ function removeClient(ws) {
     if (!room) return;
 
     if (room.host === ws) {
-        room.host = null;
-        room.hostDisconnectedAt = Date.now();
 
         if (room.guest) {
             send(room.guest, {
@@ -137,31 +141,30 @@ function removeClient(ws) {
             });
         }
 
-        // 방은 즉시 삭제하지 않음
-        // 5분 동안 방장이 다시 접속할 수 있음
+        rooms.delete(roomCode);
 
-        return;
-    }
+    } else if (room.guest === ws) {
 
-    if (room.guest === ws) {
         room.guest = null;
 
-        if (room.host) {
-            send(room.host, {
-                type: 'peerLeft'
-            });
-        }
-
-        // 방장이 살아 있으면 방은 계속 유지
+        send(room.host, {
+            type: 'peerLeft'
+        });
     }
 }
 
 function handleMessage(ws, data) {
+
+    // 방 생성
     if (data.type === 'create') {
+
         const roomCode = String(data.room || '').toUpperCase();
 
         if (!/^[A-Z0-9]{5}$/.test(roomCode)) {
-            return sendError(ws, '방 코드가 올바르지 않습니다.');
+            return sendError(
+                ws,
+                '방 코드가 올바르지 않습니다.'
+            );
         }
 
         if (rooms.has(roomCode)) {
@@ -179,8 +182,7 @@ function handleMessage(ws, data) {
             guest: null,
             winner: null,
             hostEliminated: false,
-            guestEliminated: false,
-            hostDisconnectedAt: null
+            guestEliminated: false
         });
 
         send(ws, {
@@ -191,38 +193,17 @@ function handleMessage(ws, data) {
         return;
     }
 
+    // 방 참가
     if (data.type === 'join') {
+
         const roomCode = String(data.room || '').toUpperCase();
         const room = rooms.get(roomCode);
 
         if (!room) {
-            return sendError(ws, '존재하지 않는 방입니다.');
-        }
-
-        // 방장이 나간 상태라면 같은 방 코드로 방장 복귀
-        if (
-            room.host === null &&
-            room.hostDisconnectedAt &&
-            Date.now() - room.hostDisconnectedAt < HOST_RECONNECT_TIME
-        ) {
-            ws.roomCode = roomCode;
-            ws.role = 'host';
-
-            room.host = ws;
-            room.hostDisconnectedAt = null;
-
-            send(ws, {
-                type: 'roomRejoined',
-                room: roomCode
-            });
-
-            if (room.guest) {
-                send(room.guest, {
-                    type: 'peerJoined'
-                });
-            }
-
-            return;
+            return sendError(
+                ws,
+                '존재하지 않는 방입니다.'
+            );
         }
 
         if (room.guest) {
@@ -242,11 +223,9 @@ function handleMessage(ws, data) {
             room: roomCode
         });
 
-        if (room.host) {
-            send(room.host, {
-                type: 'peerJoined'
-            });
-        }
+        send(room.host, {
+            type: 'peerJoined'
+        });
 
         return;
     }
@@ -267,7 +246,9 @@ function handleMessage(ws, data) {
 
     if (!other) return;
 
+    // 경기 시작
     if (data.type === 'matchStart') {
+
         if (ws === room.host) {
             send(other, data);
         }
@@ -275,34 +256,37 @@ function handleMessage(ws, data) {
         return;
     }
 
+    // 플레이어 위치 전달
     if (data.type === 'position') {
+
         send(other, data);
+
         return;
     }
 
+    // 클리어 처리
     if (data.type === 'finish') {
+
         if (room.winner) return;
 
         room.winner = ws.role;
 
-        if (room.host) {
-            send(room.host, {
-                type: 'matchOver',
-                winner: room.winner
-            });
-        }
+        send(room.host, {
+            type: 'matchOver',
+            winner: room.winner
+        });
 
-        if (room.guest) {
-            send(room.guest, {
-                type: 'matchOver',
-                winner: room.winner
-            });
-        }
+        send(room.guest, {
+            type: 'matchOver',
+            winner: room.winner
+        });
 
         return;
     }
 
+    // 탈락 처리
     if (data.type === 'eliminated') {
+
         if (ws === room.host) {
             room.hostEliminated = true;
         }
@@ -315,32 +299,35 @@ function handleMessage(ws, data) {
             room.hostEliminated &&
             room.guestEliminated
         ) {
+
             room.winner = 'draw';
+
         } else if (room.hostEliminated) {
+
             room.winner = 'guest';
+
         } else if (room.guestEliminated) {
+
             room.winner = 'host';
         }
 
         if (room.winner) {
-            if (room.host) {
-                send(room.host, {
-                    type: 'matchOver',
-                    winner: room.winner
-                });
-            }
 
-            if (room.guest) {
-                send(room.guest, {
-                    type: 'matchOver',
-                    winner: room.winner
-                });
-            }
+            send(room.host, {
+                type: 'matchOver',
+                winner: room.winner
+            });
+
+            send(room.guest, {
+                type: 'matchOver',
+                winner: room.winner
+            });
         }
     }
 }
 
 const server = http.createServer((req, res) => {
+
     const requestPath =
         new URL(
             req.url,
@@ -351,18 +338,24 @@ const server = http.createServer((req, res) => {
         requestPath !== '/' &&
         requestPath !== '/index.html'
     ) {
+
         res.writeHead(404, {
-            'Content-Type': 'text/plain; charset=utf-8'
+            'Content-Type':
+                'text/plain; charset=utf-8'
         });
 
         res.end('Not found');
+
         return;
     }
 
     fs.readFile(HTML_FILE, (err, data) => {
+
         if (err) {
+
             res.writeHead(500, {
-                'Content-Type': 'text/plain; charset=utf-8'
+                'Content-Type':
+                    'text/plain; charset=utf-8'
             });
 
             res.end(
@@ -373,8 +366,10 @@ const server = http.createServer((req, res) => {
         }
 
         res.writeHead(200, {
-            'Content-Type': 'text/html; charset=utf-8',
-            'Cache-Control': 'no-store'
+            'Content-Type':
+                'text/html; charset=utf-8',
+            'Cache-Control':
+                'no-store'
         });
 
         res.end(data);
@@ -382,7 +377,9 @@ const server = http.createServer((req, res) => {
 });
 
 server.on('upgrade', (req, socket) => {
-    const key = req.headers['sec-websocket-key'];
+
+    const key =
+        req.headers['sec-websocket-key'];
 
     if (!key) {
         socket.destroy();
@@ -406,24 +403,36 @@ server.on('upgrade', (req, socket) => {
     clients.add(socket);
 
     socket.on('data', chunk => {
+
         try {
-            socket.frameBuffer = Buffer.concat([
-                socket.frameBuffer,
-                chunk
-            ]);
+
+            socket.frameBuffer =
+                Buffer.concat([
+                    socket.frameBuffer,
+                    chunk
+                ]);
 
             const parsed =
-                parseFrames(socket.frameBuffer);
+                parseFrames(
+                    socket.frameBuffer
+                );
 
-            socket.frameBuffer = parsed.rest;
+            socket.frameBuffer =
+                parsed.rest;
 
-            for (const frame of parsed.messages) {
+            for (
+                const frame of parsed.messages
+            ) {
+
+                // 연결 종료
                 if (frame.opcode === 0x8) {
                     socket.end();
                     return;
                 }
 
+                // ping
                 if (frame.opcode === 0x9) {
+
                     socket.write(
                         Buffer.from([
                             0x8A,
@@ -435,7 +444,10 @@ server.on('upgrade', (req, socket) => {
                     continue;
                 }
 
-                if (frame.opcode !== 0x1) continue;
+                // text frame만 처리
+                if (frame.opcode !== 0x1) {
+                    continue;
+                }
 
                 const text =
                     frame.payload.toString('utf8');
@@ -443,8 +455,11 @@ server.on('upgrade', (req, socket) => {
                 let data;
 
                 try {
+
                     data = JSON.parse(text);
+
                 } catch {
+
                     sendError(
                         socket,
                         '잘못된 통신 데이터입니다.'
@@ -453,9 +468,14 @@ server.on('upgrade', (req, socket) => {
                     continue;
                 }
 
-                handleMessage(socket, data);
+                handleMessage(
+                    socket,
+                    data
+                );
             }
+
         } catch (error) {
+
             socket.destroy();
         }
     });
@@ -469,30 +489,17 @@ server.on('upgrade', (req, socket) => {
     });
 });
 
-// 5분이 지난 방장 연결 대기 방 삭제
-setInterval(() => {
-    const now = Date.now();
+server.listen(
+    PORT,
+    '0.0.0.0',
+    () => {
 
-    for (const [roomCode, room] of rooms) {
-        if (
-            room.host === null &&
-            room.hostDisconnectedAt &&
-            now - room.hostDisconnectedAt >= HOST_RECONNECT_TIME
-        ) {
-            rooms.delete(roomCode);
-            console.log(
-                `방 ${roomCode} 삭제: 방장 재접속 시간 만료`
-            );
-        }
+        console.log(
+            `슬라이딩 2인용 Wi-Fi 서버: http://0.0.0.0:${PORT}`
+        );
+
+        console.log(
+            '같은 Wi-Fi의 다른 기기에서는 서버 기기의 사설 IP:8080으로 접속하세요.'
+        );
     }
-}, 10000);
-
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(
-        `슬라이딩 2인용 Wi-Fi 서버: http://0.0.0.0:${PORT}`
-    );
-
-    console.log(
-        '같은 Wi-Fi의 다른 기기에서는 서버 기기의 사설 IP:8080으로 접속하세요.'
-    );
-});
+);
