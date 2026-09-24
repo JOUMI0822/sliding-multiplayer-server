@@ -1,0 +1,12 @@
+{
+  "name": "sliding-multiplayer-server",
+  "version": "1.0.0",
+  "private": true,
+  "main": "sliding-multiplayer-server.js",
+  "scripts": {
+    "start": "node sliding-multiplayer-server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}
