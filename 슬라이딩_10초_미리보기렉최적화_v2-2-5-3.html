@@ -249,6 +249,7 @@ let multiplayerResult = null;
 let multiplayerStatus = "서버 연결 중...";
 let multiplayerSendAccumulator = 0;
 let multiplayerEliminatedSent = false;
+let multiplayerMatchmaking = false;
 let multiplayerRound = 0;
 let multiplayerRoundTransition = false;
 let opponent = {
@@ -268,6 +269,7 @@ function closeMultiplayerSocket() {
     multiplayerPeerJoined = false;
     multiplayerMatchActive = false;
     multiplayerEliminatedSent = false;
+    multiplayerMatchmaking = false;
     multiplayerRound = 0;
     multiplayerRoundTransition = false;
     if (multiplayerSocket) { try { multiplayerSocket.close(); } catch (error) {} }
@@ -296,6 +298,34 @@ function sendMultiplayerPosition(force = false) {
         y: player.y,
         moving: !!movement
     });
+}
+
+function startMultiplayerMatchmaking() {
+    closeMultiplayerSocket();
+    multiplayerRole = null;
+    multiplayerRoomCode = "";
+    multiplayerSeed = 0;
+    multiplayerMatchmaking = false;
+    multiplayerPeerJoined = false;
+    multiplayerMatchActive = false;
+    multiplayerStatus = "상대를 찾는 중...";
+    updateUI();
+
+    connectMultiplayerSocket(() => {
+        multiplayerMatchmaking = true;
+        multiplayerStatus = "상대를 찾는 중...";
+        multiplayerSend({ type: "matchmake" });
+        updateUI();
+    });
+}
+
+function cancelMultiplayerMatchmaking() {
+    multiplayerMatchmaking = false;
+    multiplayerStatus = "매칭을 취소했습니다.";
+    closeMultiplayerSocket();
+    multiplayerOpen = true;
+    multiplayerRole = null;
+    updateUI();
 }
 
 function connectMultiplayerSocket(onConnected) {
@@ -332,6 +362,11 @@ function connectMultiplayerSocket(onConnected) {
             gameState = "start";
             multiplayerOpen = false;
             setMessage("상대 플레이어와의 연결이 끊어졌습니다.");
+        } else if (multiplayerMatchmaking) {
+            multiplayerStatus = "매칭 서버 연결이 종료되었습니다.";
+            multiplayerMatchmaking = false;
+            multiplayerOpen = true;
+            multiplayerRole = null;
         } else {
             multiplayerStatus = "서버 연결 종료";
         }
@@ -345,7 +380,22 @@ function handleMultiplayerMessage(data) {
         window.alert(multiplayerStatus);
         return;
     }
+    if (data.type === "matchFound") {
+        multiplayerMatchmaking = false;
+        multiplayerRole = data.role === "guest" ? "guest" : "host";
+        multiplayerRoomCode = String(data.room || "");
+        multiplayerPeerJoined = true;
+        multiplayerStatus = "상대 플레이어를 찾았습니다. 경기 준비 중...";
+        updateUI();
+
+        // 자동 매칭에서는 방장 역할을 받은 클라이언트가 즉시 첫 라운드를 시작합니다.
+        if (multiplayerRole === "host") {
+            startMultiplayerMatch();
+        }
+        return;
+    }
     if (data.type === "roomCreated") {
+        multiplayerMatchmaking = false;
         multiplayerRoomCode = String(data.room || multiplayerRoomCode);
         multiplayerStatus = "방 생성 완료 · 친구를 기다리는 중";
         multiplayerPeerJoined = false;
@@ -353,6 +403,7 @@ function handleMultiplayerMessage(data) {
         return;
     }
     if (data.type === "roomJoined") {
+        multiplayerMatchmaking = false;
         multiplayerRoomCode = String(data.room || multiplayerRoomCode);
         multiplayerStatus = "방 참가 완료 · 방장의 시작을 기다리는 중";
         updateUI();
@@ -611,13 +662,22 @@ function drawMultiplayerMenu() {
     ctx.font = "bold 30px Pretendard, Noto Sans KR, sans-serif";
     ctx.fillText("2인용 경쟁", WIDTH / 2, 125);
 
-    if (!multiplayerRole) {
+    if (multiplayerMatchmaking) {
         ctx.fillStyle = "#aeb8c4";
         ctx.font = "15px Pretendard, Noto Sans KR, sans-serif";
-        ctx.fillText("방장이 경기 방을 만들고 친구가 코드를 입력합니다.", WIDTH / 2, 165);
+        ctx.fillText("빠른 대전에서 상대 플레이어를 찾고 있습니다.", WIDTH / 2, 180);
+        ctx.fillStyle = "#63ff91";
+        ctx.font = "bold 24px Pretendard, Noto Sans KR, sans-serif";
+        ctx.fillText("상대를 찾는 중...", WIDTH / 2, 255);
+        drawSettingsButton(205, 345, 390, 48, "매칭 취소");
+    } else if (!multiplayerRole) {
+        ctx.fillStyle = "#aeb8c4";
+        ctx.font = "15px Pretendard, Noto Sans KR, sans-serif";
+        ctx.fillText("빠른 대전 또는 방 코드로 상대를 찾을 수 있습니다.", WIDTH / 2, 165);
 
-        drawSettingsButton(205, 215, 390, 58, "방 만들기");
-        drawSettingsButton(205, 295, 390, 58, "방 참가하기");
+        drawSettingsButton(205, 205, 390, 52, "⚡ 빠른 대전");
+        drawSettingsButton(205, 275, 390, 52, "방 만들기");
+        drawSettingsButton(205, 345, 390, 52, "방 참가하기");
         drawSettingsButton(305, 415, 190, 42, "돌아가기");
     } else if (multiplayerRole === "host") {
         ctx.fillStyle = "#7ddcff";
@@ -8652,12 +8712,22 @@ function handleSettingsTap(x, y) {
 
     // 2인용 메뉴가 열려 있으면 다른 시작 화면 기능보다 먼저 처리
     if (multiplayerOpen) {
-        if (!multiplayerRole) {
-            if (isInsideRect(x, y, { x: 205, y: 215, w: 390, h: 58 })) {
+        if (multiplayerMatchmaking) {
+            if (isInsideRect(x, y, { x: 205, y: 345, w: 390, h: 48 })) {
+                cancelMultiplayerMatchmaking();
+                return true;
+            }
+            return true;
+        } else if (!multiplayerRole) {
+            if (isInsideRect(x, y, { x: 205, y: 205, w: 390, h: 52 })) {
+                startMultiplayerMatchmaking();
+                return true;
+            }
+            if (isInsideRect(x, y, { x: 205, y: 275, w: 390, h: 52 })) {
                 createMultiplayerRoom();
                 return true;
             }
-            if (isInsideRect(x, y, { x: 205, y: 295, w: 390, h: 58 })) {
+            if (isInsideRect(x, y, { x: 205, y: 345, w: 390, h: 52 })) {
                 joinMultiplayerRoom();
                 return true;
             }
