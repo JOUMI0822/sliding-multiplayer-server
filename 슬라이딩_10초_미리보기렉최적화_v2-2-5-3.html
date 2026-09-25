@@ -657,19 +657,47 @@ function startNextMultiplayerRound(nextStart = { c: player.c, r: player.r }) {
 }
 
 function sendMultiplayerEliminated() {
-    if (!multiplayerMatchActive || multiplayerEliminatedSent) return;
-    multiplayerEliminatedSent = true;
-    multiplayerRoundTransition = false;
+    if (!multiplayerMatchActive) return;
+
+    // 목숨이 남아 있으면 완전 탈락이 아닙니다.
+    // 현재 맵에서 캐릭터만 잠시 숨긴 뒤 같은 맵에서 다시 시작합니다.
     multiplayerPlayerVisible = false;
-    opponent.visible = false;
+    movement = null;
     multiplayerSend({
         type: "eliminated",
         round: multiplayerRound,
+        livesRemaining: Math.max(0, lives),
         position: { c: player.c, r: player.r }
     });
+
+    if (lives > 0) {
+        multiplayerEliminatedSent = false;
+        gameState = "multiplayerRespawning";
+        setMessage(`탈락! 목숨 ${lives}개 남음 · 잠시 후 다시 시작합니다.`);
+        updateUI();
+
+        clearTimeout(roundTimer);
+        roundTimer = setTimeout(() => {
+            if (!multiplayerMatchActive || lives <= 0) return;
+
+            resetPlayer();
+            multiplayerPlayerVisible = true;
+            gameState = "playing";
+            remainingTime = TIME_LIMIT + activeTimeBonus;
+            resetOpponent();
+            sendMultiplayerPosition(true);
+            setMessage(`다시 시작! 목숨 ${lives}개 남음`);
+            updateUI();
+        }, 850);
+        return;
+    }
+
+    // 목숨이 0개일 때만 완전 탈락 처리합니다.
+    multiplayerEliminatedSent = true;
+    multiplayerRoundTransition = false;
     gameState = "multiplayerWaitingResult";
-    movement = null;
-    setMessage("탈락했습니다. 상대 플레이어의 결과를 기다리는 중...");
+    opponent.visible = false;
+    setMessage("목숨을 모두 잃었습니다. 상대 플레이어의 결과를 기다리는 중...");
     updateUI();
 }
 
