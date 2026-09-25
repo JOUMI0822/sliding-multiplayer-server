@@ -57,131 +57,323 @@ function parseFrames(buffer) {
         } else if (length === 127) {
             if (offset + 10 > buffer.length) break;
             const bigLength = buffer.readBigUInt64BE(offset + 2);
-            if (bigLength > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('Frame too large');
+            if (bigLength > BigInt(Number.MAX_SAFE_INTEGER)) {
+                throw new Error('Frame too large');
+            }
             length = Number(bigLength);
             headerLength = 10;
         }
 
         const maskLength = masked ? 4 : 0;
         const frameLength = headerLength + maskLength + length;
+
         if (offset + frameLength > buffer.length) break;
 
         let payloadStart = offset + headerLength;
-        const mask = masked ? buffer.subarray(payloadStart, payloadStart + 4) : null;
+        const mask = masked
+            ? buffer.subarray(payloadStart, payloadStart + 4)
+            : null;
+
         if (masked) payloadStart += 4;
-        const payload = Buffer.from(buffer.subarray(payloadStart, payloadStart + length));
+
+        const payload = Buffer.from(
+            buffer.subarray(
+                payloadStart,
+                payloadStart + length
+            )
+        );
 
         if (masked) {
-            for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
+            for (let i = 0; i < payload.length; i++) {
+                payload[i] ^= mask[i % 4];
+            }
         }
 
-        messages.push({ opcode, payload });
+        messages.push({
+            opcode,
+            payload
+        });
+
         offset += frameLength;
     }
 
-    return { messages, rest: buffer.subarray(offset) };
+    return {
+        messages,
+        rest: buffer.subarray(offset)
+    };
 }
 
-function sendError(ws, message) { send(ws, { type: 'error', message }); }
+function sendError(ws, message) {
+    send(ws, {
+        type: 'error',
+        message
+    });
+}
 
 function removeClient(ws) {
     clients.delete(ws);
+
     const roomCode = ws.roomCode;
+
     if (!roomCode) return;
+
     const room = rooms.get(roomCode);
+
     if (!room) return;
 
     if (room.host === ws) {
-        if (room.guest) send(room.guest, { type: 'peerLeft' });
+        if (room.guest) {
+            send(room.guest, {
+                type: 'peerLeft'
+            });
+        }
+
         rooms.delete(roomCode);
+
     } else if (room.guest === ws) {
+
         room.guest = null;
-        send(room.host, { type: 'peerLeft' });
+
+        send(room.host, {
+            type: 'peerLeft'
+        });
     }
 }
 
 function handleMessage(ws, data) {
+
     if (data.type === 'create') {
-        const roomCode = String(data.room || '').toUpperCase();
-        if (!/^[A-Z0-9]{5}$/.test(roomCode)) return sendError(ws, '방 코드가 올바르지 않습니다.');
-        if (rooms.has(roomCode)) return sendError(ws, '이미 사용 중인 방 코드입니다. 새 방을 만들어 주세요.');
+
+        const roomCode =
+            String(data.room || '').toUpperCase();
+
+        if (!/^[A-Z0-9]{5}$/.test(roomCode)) {
+            return sendError(
+                ws,
+                '방 코드가 올바르지 않습니다.'
+            );
+        }
+
+        if (rooms.has(roomCode)) {
+            return sendError(
+                ws,
+                '이미 사용 중인 방 코드입니다. 새 방을 만들어 주세요.'
+            );
+        }
+
         ws.roomCode = roomCode;
         ws.role = 'host';
-        rooms.set(roomCode, { host: ws, guest: null, winner: null, hostEliminated: false, guestEliminated: false });
-        send(ws, { type: 'roomCreated', room: roomCode });
+
+        rooms.set(roomCode, {
+            host: ws,
+            guest: null,
+            winner: null,
+            hostEliminated: false,
+            guestEliminated: false
+        });
+
+        send(ws, {
+            type: 'roomCreated',
+            room: roomCode
+        });
+
         return;
     }
 
     if (data.type === 'join') {
-        const roomCode = String(data.room || '').toUpperCase();
+
+        const roomCode =
+            String(data.room || '').toUpperCase();
+
         const room = rooms.get(roomCode);
-        if (!room) return sendError(ws, '존재하지 않는 방입니다.');
-        if (room.guest) return sendError(ws, '이미 두 명이 참가한 방입니다.');
+
+        if (!room) {
+            return sendError(
+                ws,
+                '존재하지 않는 방입니다.'
+            );
+        }
+
+        if (room.guest) {
+            return sendError(
+                ws,
+                '이미 두 명이 참가한 방입니다.'
+            );
+        }
+
         ws.roomCode = roomCode;
         ws.role = 'guest';
+
         room.guest = ws;
-        send(ws, { type: 'roomJoined', room: roomCode });
-        send(room.host, { type: 'peerJoined' });
+
+        send(ws, {
+            type: 'roomJoined',
+            room: roomCode
+        });
+
+        send(room.host, {
+            type: 'peerJoined'
+        });
+
         return;
     }
 
     const room = rooms.get(ws.roomCode);
-    if (!room) return sendError(ws, '먼저 방을 만들어 주세요.');
-    const other = ws === room.host ? room.guest : room.host;
+
+    if (!room) {
+        return sendError(
+            ws,
+            '먼저 방을 만들어 주세요.'
+        );
+    }
+
+    const other =
+        ws === room.host
+            ? room.guest
+            : room.host;
+
     if (!other) return;
 
     if (data.type === 'matchStart') {
-        if (ws === room.host) send(other, data);
+
+        if (ws === room.host) {
+            send(other, data);
+        }
+
         return;
     }
 
     if (data.type === 'position') {
+
         send(other, data);
+
         return;
     }
 
     if (data.type === 'finish') {
+
         if (room.winner) return;
+
         room.winner = ws.role;
-        send(room.host, { type: 'matchOver', winner: room.winner });
-        send(room.guest, { type: 'matchOver', winner: room.winner });
+
+        send(room.host, {
+            type: 'matchOver',
+            winner: room.winner
+        });
+
+        send(room.guest, {
+            type: 'matchOver',
+            winner: room.winner
+        });
+
         return;
     }
 
     if (data.type === 'eliminated') {
-        if (ws === room.host) room.hostEliminated = true;
-        if (ws === room.guest) room.guestEliminated = true;
-        if (room.hostEliminated && room.guestEliminated) room.winner = 'draw';
-        else if (room.hostEliminated) room.winner = 'guest';
-        else if (room.guestEliminated) room.winner = 'host';
+
+        if (ws === room.host) {
+            room.hostEliminated = true;
+        }
+
+        if (ws === room.guest) {
+            room.guestEliminated = true;
+        }
+
+        if (
+            room.hostEliminated &&
+            room.guestEliminated
+        ) {
+
+            room.winner = 'draw';
+
+        } else if (room.hostEliminated) {
+
+            room.winner = 'guest';
+
+        } else if (room.guestEliminated) {
+
+            room.winner = 'host';
+        }
+
         if (room.winner) {
-            send(room.host, { type: 'matchOver', winner: room.winner });
-            send(room.guest, { type: 'matchOver', winner: room.winner });
+
+            send(room.host, {
+                type: 'matchOver',
+                winner: room.winner
+            });
+
+            send(room.guest, {
+                type: 'matchOver',
+                winner: room.winner
+            });
         }
     }
 }
 
 const server = http.createServer((req, res) => {
-    const requestPath = new URL(req.url, `http://${req.headers.host}`).pathname;
-    if (requestPath !== '/' && requestPath !== '/index.html') {
-        res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+
+    const requestPath =
+        new URL(
+            req.url,
+            `http://${req.headers.host}`
+        ).pathname;
+
+    if (
+        requestPath !== '/' &&
+        requestPath !== '/index.html'
+    ) {
+
+        res.writeHead(404, {
+            'Content-Type':
+                'text/plain; charset=utf-8'
+        });
+
         res.end('Not found');
+
         return;
     }
-    fs.readFile(HTML_FILE, (err, data) => {
-        if (err) {
-            res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
-            res.end('HTML 파일을 찾을 수 없습니다.');
-            return;
+
+    fs.readFile(
+        HTML_FILE,
+        (err, data) => {
+
+            if (err) {
+
+                res.writeHead(500, {
+                    'Content-Type':
+                        'text/plain; charset=utf-8'
+                });
+
+                res.end(
+                    'HTML 파일을 찾을 수 없습니다.'
+                );
+
+                return;
+            }
+
+            res.writeHead(200, {
+                'Content-Type':
+                    'text/html; charset=utf-8',
+
+                'Cache-Control':
+                    'no-store'
+            });
+
+            res.end(data);
         }
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-        res.end(data);
-    });
+    );
 });
 
 server.on('upgrade', (req, socket) => {
-    const key = req.headers['sec-websocket-key'];
-    if (!key) { socket.destroy(); return; }
+
+    const key =
+        req.headers['sec-websocket-key'];
+
+    if (!key) {
+        socket.destroy();
+        return;
+    }
+
     const headers = [
         'HTTP/1.1 101 Switching Protocols',
         'Upgrade: websocket',
@@ -189,37 +381,116 @@ server.on('upgrade', (req, socket) => {
         `Sec-WebSocket-Accept: ${wsAcceptKey(key)}`,
         '\r\n'
     ];
-    socket.write(headers.join('\r\n'));
+
+    socket.write(
+        headers.join('\r\n')
+    );
 
     socket.roomCode = null;
     socket.role = null;
     socket.frameBuffer = Buffer.alloc(0);
+
     clients.add(socket);
 
     socket.on('data', chunk => {
+
         try {
-            socket.frameBuffer = Buffer.concat([socket.frameBuffer, chunk]);
-            const parsed = parseFrames(socket.frameBuffer);
-            socket.frameBuffer = parsed.rest;
-            for (const frame of parsed.messages) {
-                if (frame.opcode === 0x8) { socket.end(); return; }
-                if (frame.opcode === 0x9) { socket.write(Buffer.from([0x8A, frame.payload.length, ...frame.payload])); continue; }
-                if (frame.opcode !== 0x1) continue;
-                const text = frame.payload.toString('utf8');
+
+            socket.frameBuffer =
+                Buffer.concat([
+                    socket.frameBuffer,
+                    chunk
+                ]);
+
+            const parsed =
+                parseFrames(
+                    socket.frameBuffer
+                );
+
+            socket.frameBuffer =
+                parsed.rest;
+
+            for (
+                const frame of parsed.messages
+            ) {
+
+                if (frame.opcode === 0x8) {
+                    socket.end();
+                    return;
+                }
+
+                if (frame.opcode === 0x9) {
+
+                    socket.write(
+                        Buffer.from([
+                            0x8A,
+                            frame.payload.length,
+                            ...frame.payload
+                        ])
+                    );
+
+                    continue;
+                }
+
+                if (frame.opcode !== 0x1) {
+                    continue;
+                }
+
+                const text =
+                    frame.payload.toString(
+                        'utf8'
+                    );
+
                 let data;
-                try { data = JSON.parse(text); } catch { sendError(socket, '잘못된 통신 데이터입니다.'); continue; }
-                handleMessage(socket, data);
+
+                try {
+
+                    data = JSON.parse(text);
+
+                } catch {
+
+                    sendError(
+                        socket,
+                        '잘못된 통신 데이터입니다.'
+                    );
+
+                    continue;
+                }
+
+                handleMessage(
+                    socket,
+                    data
+                );
             }
+
         } catch (error) {
+
             socket.destroy();
         }
     });
 
-    socket.on('close', () => removeClient(socket));
-    socket.on('error', () => removeClient(socket));
+    socket.on(
+        'close',
+        () => removeClient(socket)
+    );
+
+    socket.on(
+        'error',
+        () => removeClient(socket)
+    );
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`슬라이딩 2인용 Wi-Fi 서버: http://0.0.0.0:${PORT}`);
-    console.log('같은 Wi-Fi의 다른 기기에서는 서버 기기의 사설 IP:8080으로 접속하세요.');
-});
+server.listen(
+    PORT,
+    '0.0.0.0',
+    () => {
+
+        console.log(
+            `슬라이딩 2인용 Wi-Fi 서버: http://0.0.0.0:${PORT}`
+        );
+
+        console.log(
+            '같은 Wi-Fi의 다른 기기에서는 서버 기기의 사설 IP:8080으로 접속하세요.'
+        );
+    }
+);
