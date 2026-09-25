@@ -7,6 +7,22 @@ const PORT = Number(process.env.PORT || 8080);
 const HTML_FILE = path.join(__dirname, '슬라이딩_10초_미리보기렉최적화_v2-2-5.html');
 const rooms = new Map();
 const clients = new Set();
+const matchmakingQueue = [];
+
+function generateRoomCode() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let code = '';
+    do {
+        code = '';
+        for (let i = 0; i < 5; i++) code += chars[Math.floor(Math.random() * chars.length)];
+    } while (rooms.has(code));
+    return code;
+}
+
+function removeFromMatchmaking(ws) {
+    const index = matchmakingQueue.indexOf(ws);
+    if (index !== -1) matchmakingQueue.splice(index, 1);
+}
 
 function wsAcceptKey(key) {
     return crypto.createHash('sha1')
@@ -86,6 +102,7 @@ function sendError(ws, message) { send(ws, { type: 'error', message }); }
 
 function removeClient(ws) {
     clients.delete(ws);
+    removeFromMatchmaking(ws);
     const roomCode = ws.roomCode;
     if (!roomCode) return;
     const room = rooms.get(roomCode);
@@ -101,6 +118,44 @@ function removeClient(ws) {
 }
 
 function handleMessage(ws, data) {
+    if (data.type === 'matchmake') {
+        removeFromMatchmaking(ws);
+
+        let opponent = null;
+        while (matchmakingQueue.length) {
+            const candidate = matchmakingQueue.shift();
+            if (candidate && !candidate.destroyed && candidate !== ws && !candidate.roomCode) {
+                opponent = candidate;
+                break;
+            }
+        }
+
+        if (!opponent) {
+            matchmakingQueue.push(ws);
+            send(ws, { type: 'matchWaiting' });
+            return;
+        }
+
+        const roomCode = generateRoomCode();
+        const room = {
+            host: opponent,
+            guest: ws,
+            winner: null,
+            hostEliminated: false,
+            guestEliminated: false
+        };
+        rooms.set(roomCode, room);
+
+        opponent.roomCode = roomCode;
+        opponent.role = 'host';
+        ws.roomCode = roomCode;
+        ws.role = 'guest';
+
+        send(opponent, { type: 'matchFound', role: 'host' });
+        send(ws, { type: 'matchFound', role: 'guest' });
+        return;
+    }
+
     if (data.type === 'create') {
         const roomCode = String(data.room || '').toUpperCase();
         if (!/^[A-Z0-9]{5}$/.test(roomCode)) return sendError(ws, '방 코드가 올바르지 않습니다.');
@@ -126,7 +181,9 @@ function handleMessage(ws, data) {
     }
 
     const room = rooms.get(ws.roomCode);
-    if (!room) return sendError(ws, '먼저 방을 만들어 주세요.');
+    // 빠른 대전/재접속 과정에서 방 정보가 아직 반영되기 전의 메시지는 무시합니다.
+    // 이 경우 사용자에게 '먼저 방을 만들어 주세요.' 오류를 띄우지 않습니다.
+    if (!room) return;
     const other = ws === room.host ? room.guest : room.host;
     if (!other) return;
 
