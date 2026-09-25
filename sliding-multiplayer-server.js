@@ -7,6 +7,20 @@ const PORT = Number(process.env.PORT || 8080);
 const HTML_FILE = path.join(__dirname, '슬라이딩_10초_미리보기렉최적화_v2-2-5.html');
 const rooms = new Map();
 const clients = new Set();
+let matchmakingWaiter = null;
+
+function generateRoomCode() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let code = '';
+    for (let i = 0; i < 5; i++) code += chars[Math.floor(Math.random() * chars.length)];
+    return code;
+}
+
+function createUniqueRoomCode() {
+    let code;
+    do { code = generateRoomCode(); } while (rooms.has(code));
+    return code;
+}
 
 function wsAcceptKey(key) {
     return crypto.createHash('sha1')
@@ -86,6 +100,7 @@ function sendError(ws, message) { send(ws, { type: 'error', message }); }
 
 function removeClient(ws) {
     clients.delete(ws);
+    if (matchmakingWaiter === ws) matchmakingWaiter = null;
     const roomCode = ws.roomCode;
     if (!roomCode) return;
     const room = rooms.get(roomCode);
@@ -101,10 +116,53 @@ function removeClient(ws) {
 }
 
 function handleMessage(ws, data) {
+    if (data.type === 'matchmake') {
+        if (ws.roomCode) return sendError(ws, '이미 다른 대전에 참가 중입니다.');
+        if (matchmakingWaiter === ws) return;
+
+        if (matchmakingWaiter && (matchmakingWaiter.destroyed || !clients.has(matchmakingWaiter))) {
+            matchmakingWaiter = null;
+        }
+
+        if (!matchmakingWaiter) {
+            matchmakingWaiter = ws;
+            ws.matchmaking = true;
+            send(ws, { type: 'matchmakingWaiting' });
+            return;
+        }
+
+        const other = matchmakingWaiter;
+        matchmakingWaiter = null;
+        other.matchmaking = false;
+        ws.matchmaking = false;
+
+        const roomCode = createUniqueRoomCode();
+        other.roomCode = roomCode;
+        other.role = 'host';
+        ws.matchmaking = false;
+        ws.roomCode = roomCode;
+        ws.role = 'guest';
+
+        rooms.set(roomCode, {
+            host: other,
+            guest: ws,
+            winner: null,
+            hostEliminated: false,
+            guestEliminated: false,
+            round: 0,
+            roundResolved: false
+        });
+
+        send(other, { type: 'matchFound', role: 'host', room: roomCode });
+        send(ws, { type: 'matchFound', role: 'guest', room: roomCode });
+        return;
+    }
+
     if (data.type === 'create') {
         const roomCode = String(data.room || '').toUpperCase();
         if (!/^[A-Z0-9]{5}$/.test(roomCode)) return sendError(ws, '방 코드가 올바르지 않습니다.');
         if (rooms.has(roomCode)) return sendError(ws, '이미 사용 중인 방 코드입니다. 새 방을 만들어 주세요.');
+        ws.matchmaking = false;
         ws.roomCode = roomCode;
         ws.role = 'host';
         rooms.set(roomCode, { host: ws, guest: null, winner: null, hostEliminated: false, guestEliminated: false, round: 0, roundResolved: false });
@@ -206,6 +264,7 @@ server.on('upgrade', (req, socket) => {
 
     socket.roomCode = null;
     socket.role = null;
+    socket.matchmaking = false;
     socket.frameBuffer = Buffer.alloc(0);
     clients.add(socket);
 
