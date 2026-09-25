@@ -557,8 +557,9 @@ function handleMultiplayerMessage(data) {
         multiplayerRoundTransition = true;
         multiplayerPlayerVisible = true;
         const winner = data.winner || "draw";
+        const roundReason = data.reason || "clear";
 
-        if (winner === multiplayerRole) {
+        if (winner === multiplayerRole && roundReason !== "timeout") {
             clearCount++;
             clearStreak++;
             maxClearStreak = Math.max(maxClearStreak, clearStreak);
@@ -4000,7 +4001,7 @@ function clearGame() {
         movement = null;
         gameState = "multiplayerWaitingRound";
         multiplayerRoundTransition = false;
-        multiplayerSend({ type: "finish", round: multiplayerRound, position: { c: player.c, r: player.r } });
+        multiplayerSend({ type: "finish", round: multiplayerRound, reason: "clear", position: { c: player.c, r: player.r } });
         setMessage("클리어! 상대 결과를 확인하는 중...");
         updateUI();
         return;
