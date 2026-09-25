@@ -252,6 +252,8 @@ let multiplayerEliminatedSent = false;
 let multiplayerMatchmaking = false;
 let multiplayerRound = 0;
 let multiplayerRoundTransition = false;
+let multiplayerPeerLeftDeadline = 0;
+let multiplayerPeerLeftTimer = null;
 let opponent = {
     x: 0, y: 0,
     targetX: 0, targetY: 0,
@@ -265,6 +267,11 @@ function multiplayerSend(data) {
 }
 
 function closeMultiplayerSocket() {
+    if (multiplayerPeerLeftTimer) {
+        clearInterval(multiplayerPeerLeftTimer);
+        multiplayerPeerLeftTimer = null;
+    }
+    multiplayerPeerLeftDeadline = 0;
     multiplayerConnected = false;
     multiplayerPeerJoined = false;
     multiplayerMatchActive = false;
@@ -411,20 +418,59 @@ function handleMultiplayerMessage(data) {
     }
     if (data.type === "peerJoined") {
         multiplayerPeerJoined = true;
-        multiplayerStatus = "상대 플레이어가 참가했습니다. 경기 시작을 눌러주세요.";
+        multiplayerPeerLeftDeadline = 0;
+        if (multiplayerPeerLeftTimer) {
+            clearInterval(multiplayerPeerLeftTimer);
+            multiplayerPeerLeftTimer = null;
+        }
+        if (multiplayerMatchActive || gameState === "multiplayerWaitingResult") {
+            multiplayerStatus = "상대 플레이어가 재접속했습니다. 경기를 계속합니다.";
+            setMessage("상대 플레이어가 재접속했습니다. 경기를 계속합니다.");
+        } else {
+            multiplayerStatus = "상대 플레이어가 참가했습니다. 경기 시작을 눌러주세요.";
+        }
         updateUI();
         return;
     }
     if (data.type === "peerLeft") {
         multiplayerPeerJoined = false;
-        if (multiplayerMatchActive) {
-            multiplayerMatchActive = false;
-            gameState = "start";
-            multiplayerOpen = false;
-            setMessage("상대 플레이어가 방을 나갔습니다.");
-        } else {
-            multiplayerStatus = "상대 플레이어가 나갔습니다.";
+        multiplayerPeerLeftDeadline = Date.now() + 10000;
+        if (multiplayerPeerLeftTimer) clearInterval(multiplayerPeerLeftTimer);
+
+        const updatePeerLeftCountdown = () => {
+            if (multiplayerPeerLeftDeadline <= 0) return;
+            const remain = Math.max(0, (multiplayerPeerLeftDeadline - Date.now()) / 1000);
+            if (remain <= 0) {
+                clearInterval(multiplayerPeerLeftTimer);
+                multiplayerPeerLeftTimer = null;
+                return;
+            }
+            const text = `상대 플레이어가 나갔습니다. ${Math.ceil(remain)}초 동안 재접속을 기다립니다...`;
+            multiplayerStatus = text;
+            setMessage(text);
+            updateUI();
+        };
+
+        updatePeerLeftCountdown();
+        multiplayerPeerLeftTimer = setInterval(updatePeerLeftCountdown, 100);
+        return;
+    }
+    if (data.type === "playerLeftTimeout") {
+        multiplayerPeerLeftDeadline = 0;
+        if (multiplayerPeerLeftTimer) {
+            clearInterval(multiplayerPeerLeftTimer);
+            multiplayerPeerLeftTimer = null;
         }
+        multiplayerPeerJoined = false;
+        multiplayerMatchActive = false;
+        multiplayerResult = data.winner || multiplayerResult || "draw";
+        gameState = "multiplayerResult";
+        movement = null;
+        multiplayerOpen = false;
+        setMessage(
+            multiplayerResult === multiplayerRole ? "승리했습니다!" :
+            multiplayerResult === "draw" ? "무승부입니다." : "패배했습니다."
+        );
         updateUI();
         return;
     }
@@ -4921,15 +4967,6 @@ gameWrapper.addEventListener(
                 gameState !==
                 "gameover"
             ) {
-                // 2인 대전에서는 더블 터치로 맵을 넘길 수 없음
-                if (
-                    multiplayerMatchActive ||
-                    gameState === "multiplayerWaitingRound" ||
-                    gameState === "multiplayerWaitingResult"
-                ) {
-                    return;
-                }
-
                 if (!useSecondPathGuide()) {
                     skipMap();
                 }
