@@ -4921,6 +4921,15 @@ gameWrapper.addEventListener(
                 gameState !==
                 "gameover"
             ) {
+                // 2인 대전에서는 더블 터치로 맵을 넘길 수 없음
+                if (
+                    multiplayerMatchActive ||
+                    gameState === "multiplayerWaitingRound" ||
+                    gameState === "multiplayerWaitingResult"
+                ) {
+                    return;
+                }
+
                 if (!useSecondPathGuide()) {
                     skipMap();
                 }
