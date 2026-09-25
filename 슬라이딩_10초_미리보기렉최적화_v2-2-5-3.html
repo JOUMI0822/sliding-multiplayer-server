@@ -252,6 +252,7 @@ let multiplayerEliminatedSent = false;
 let multiplayerMatchmaking = false;
 let multiplayerRound = 0;
 let multiplayerRoundTransition = false;
+let multiplayerPlayerVisible = true;
 let multiplayerPeerLeftDeadline = 0;
 let multiplayerPeerLeftTimer = null;
 let opponent = {
@@ -390,9 +391,11 @@ function handleMultiplayerMessage(data) {
     if (data.type === "matchFound") {
         multiplayerMatchmaking = false;
         multiplayerRole = data.role === "guest" ? "guest" : "host";
-        multiplayerRoomCode = String(data.room || "");
+        // 빠른 대전은 내부 방 코드를 사용자에게 표시하지 않습니다.
+        multiplayerRoomCode = "";
         multiplayerPeerJoined = true;
         multiplayerStatus = "상대 플레이어를 찾았습니다. 경기 준비 중...";
+        multiplayerOpen = false;
         updateUI();
 
         // 자동 매칭에서는 방장 역할을 받은 클라이언트가 즉시 첫 라운드를 시작합니다.
@@ -491,6 +494,7 @@ function handleMultiplayerMessage(data) {
         multiplayerResult = null;
         multiplayerEliminatedSent = false;
         multiplayerRoundTransition = false;
+        multiplayerPlayerVisible = true;
         multiplayerSeed = Number(data.seed) || 0;
         multiplayerRound = Number(data.round) || (multiplayerRound + 1);
         multiplayerOpen = false;
@@ -514,7 +518,9 @@ function handleMultiplayerMessage(data) {
 
         gameState = "playing";
         remainingTime = TIME_LIMIT + activeTimeBonus;
-        stageStart = { c: START.c, r: START.r };
+        stageStart = data.startPosition && Number.isFinite(Number(data.startPosition.c)) && Number.isFinite(Number(data.startPosition.r))
+            ? { c: Number(data.startPosition.c), r: Number(data.startPosition.r) }
+            : { c: START.c, r: START.r };
         walls = new Set(Array.isArray(data.walls) ? data.walls.map(String) : []);
         goal = data.goal ? { c: Number(data.goal.c), r: Number(data.goal.r) } : null;
         dangers = new Set(Array.isArray(data.dangers) ? data.dangers.map(String) : []);
@@ -535,6 +541,7 @@ function handleMultiplayerMessage(data) {
         if (multiplayerRoundTransition) return;
 
         multiplayerRoundTransition = true;
+        multiplayerPlayerVisible = true;
         const winner = data.winner || "draw";
 
         if (winner === multiplayerRole) {
@@ -563,7 +570,11 @@ function handleMultiplayerMessage(data) {
 
         movement = null;
         if (multiplayerRole === "host") {
-            startNextMultiplayerRound();
+            startNextMultiplayerRound(
+                data.nextStart && Number.isFinite(Number(data.nextStart.c)) && Number.isFinite(Number(data.nextStart.r))
+                    ? { c: Number(data.nextStart.c), r: Number(data.nextStart.r) }
+                    : { c: player.c, r: player.r }
+            );
         } else {
             gameState = "multiplayerWaitingRound";
             setMessage(winner === multiplayerRole ? "클리어! 다음 맵을 준비합니다." : "상대가 먼저 클리어했습니다. 다음 맵을 기다리는 중...");
@@ -598,13 +609,14 @@ function startMultiplayerMatch() {
     startNewGame();
     multiplayerSend({
         type: "matchStart", round: multiplayerRound, seed: multiplayerSeed,
+        startPosition: { c: stageStart.c, r: stageStart.r },
         walls: [...walls], goal: goal ? { c: goal.c, r: goal.r } : null,
         dangers: [...dangers]
     });
     resetOpponent(); sendMultiplayerPosition(true);
 }
 
-function startNextMultiplayerRound() {
+function startNextMultiplayerRound(nextStart = { c: player.c, r: player.r }) {
     if (multiplayerRole !== "host" || !multiplayerMatchActive) return;
 
     clearTimeout(roundTimer);
@@ -612,12 +624,17 @@ function startNextMultiplayerRound() {
     multiplayerSeed = generateMatchSeed();
     multiplayerEliminatedSent = false;
     multiplayerRoundTransition = false;
-    stageStart = { c: START.c, r: START.r };
+    multiplayerPlayerVisible = true;
+    stageStart = {
+        c: Number(nextStart.c),
+        r: Number(nextStart.r)
+    };
 
     startRound();
 
     multiplayerSend({
         type: "matchStart", round: multiplayerRound, seed: multiplayerSeed,
+        startPosition: { c: stageStart.c, r: stageStart.r },
         walls: [...walls], goal: goal ? { c: goal.c, r: goal.r } : null,
         dangers: [...dangers]
     });
@@ -629,10 +646,16 @@ function sendMultiplayerEliminated() {
     if (!multiplayerMatchActive || multiplayerEliminatedSent) return;
     multiplayerEliminatedSent = true;
     multiplayerRoundTransition = false;
-    multiplayerSend({ type: "eliminated", round: multiplayerRound });
+    multiplayerPlayerVisible = false;
+    opponent.visible = false;
+    multiplayerSend({
+        type: "eliminated",
+        round: multiplayerRound,
+        position: { c: player.c, r: player.r }
+    });
     gameState = "multiplayerWaitingResult";
     movement = null;
-    setMessage("탈락했습니다. 상대 결과를 기다리는 중...");
+    setMessage("탈락했습니다. 상대 플레이어의 결과를 기다리는 중...");
     updateUI();
 }
 
@@ -3597,6 +3620,11 @@ function startRound() {
 
 function skipMap() {
 
+    // 2인용 대전 중에는 맵 넘기기를 사용할 수 없습니다.
+    if (multiplayerMatchActive) {
+        return;
+    }
+
     if (
         gameState === "start" ||
         gameState === "gameover"
@@ -3930,7 +3958,7 @@ function clearGame() {
         movement = null;
         gameState = "multiplayerWaitingRound";
         multiplayerRoundTransition = false;
-        multiplayerSend({ type: "finish", round: multiplayerRound });
+        multiplayerSend({ type: "finish", round: multiplayerRound, position: { c: player.c, r: player.r } });
         setMessage("클리어! 상대 결과를 확인하는 중...");
         updateUI();
         return;
@@ -4086,6 +4114,11 @@ function dieGame() {
     flash.alpha =
         0.32;
 
+    if (multiplayerMatchActive) {
+        sendMultiplayerEliminated();
+        return;
+    }
+
     gameState = "dead";
 
     if (
@@ -4183,6 +4216,11 @@ function timeoutGame() {
 
     flash.alpha =
         0.32;
+
+    if (multiplayerMatchActive) {
+        sendMultiplayerEliminated();
+        return;
+    }
 
     gameState =
         "timeout";
@@ -4418,10 +4456,9 @@ function updateUI() {
         }
     }
 
-    document.getElementById(
-        "mapSkips"
-    ).textContent =
-        `맵 넘기기 ${skipIcons}`;
+    const mapSkipsElement = document.getElementById("mapSkips");
+    mapSkipsElement.textContent = `맵 넘기기 ${skipIcons}`;
+    mapSkipsElement.style.display = (multiplayerMatchActive || gameState === "multiplayerWaitingRound" || gameState === "multiplayerWaitingResult" || gameState === "multiplayerResult") ? "none" : "block";
 
     const itemInfo = document.getElementById("itemInfo");
     const itemWarning = document.getElementById("itemWarning");
@@ -4965,7 +5002,11 @@ gameWrapper.addEventListener(
 
             if (
                 gameState !==
-                "gameover"
+                "gameover" &&
+                !multiplayerMatchActive &&
+                gameState !== "multiplayerWaitingRound" &&
+                gameState !== "multiplayerWaitingResult" &&
+                gameState !== "multiplayerResult"
             ) {
                 if (!useSecondPathGuide()) {
                     skipMap();
@@ -7549,14 +7590,15 @@ function drawGame() {
        플레이어 - 초록색
     ===================================================== */
 
-    const px =
-        player.x + 5;
+    if (multiplayerPlayerVisible || !multiplayerMatchActive) {
+        const px =
+            player.x + 5;
 
-    const py =
-        player.y + 5;
+        const py =
+            player.y + 5;
 
-    ctx.fillStyle =
-        "#45e77b";
+        ctx.fillStyle =
+            "#45e77b";
 
     ctx.fillRect(
         px,
@@ -7568,12 +7610,13 @@ function drawGame() {
     ctx.fillStyle =
         "rgba(255,255,255,0.30)";
 
-    ctx.fillRect(
-        px + 5,
-        py + 5,
-        CELL - 20,
-        5
-    );
+        ctx.fillRect(
+            px + 5,
+            py + 5,
+            CELL - 20,
+            5
+        );
+    }
 
 
     ctx.restore();
