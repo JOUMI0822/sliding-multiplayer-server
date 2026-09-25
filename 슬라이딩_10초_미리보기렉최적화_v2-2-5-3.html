@@ -240,7 +240,7 @@ let multiplayerOpponentName = "상대 플레이어";
 /* =========================================================
    2인용 서버 실제 연결
 ========================================================= */
-const MULTIPLAYER_SERVER_URL = "wss://sliding-multiplayer-server.onrender.com";
+const MULTIPLAYER_SERVER_URL = "wss://sliding-multiplayer-server-1.onrender.com";
 let multiplayerSocket = null;
 let multiplayerConnected = false;
 let multiplayerPeerJoined = false;
@@ -249,6 +249,8 @@ let multiplayerResult = null;
 let multiplayerStatus = "서버 연결 중...";
 let multiplayerSendAccumulator = 0;
 let multiplayerEliminatedSent = false;
+let multiplayerRound = 0;
+let multiplayerRoundTransition = false;
 let opponent = {
     x: 0, y: 0,
     targetX: 0, targetY: 0,
@@ -266,6 +268,8 @@ function closeMultiplayerSocket() {
     multiplayerPeerJoined = false;
     multiplayerMatchActive = false;
     multiplayerEliminatedSent = false;
+    multiplayerRound = 0;
+    multiplayerRoundTransition = false;
     if (multiplayerSocket) { try { multiplayerSocket.close(); } catch (error) {} }
     multiplayerSocket = null;
 }
@@ -389,68 +393,85 @@ function handleMultiplayerMessage(data) {
         multiplayerMatchActive = true;
         multiplayerResult = null;
         multiplayerEliminatedSent = false;
+        multiplayerRoundTransition = false;
         multiplayerSeed = Number(data.seed) || 0;
+        multiplayerRound = Number(data.round) || (multiplayerRound + 1);
         multiplayerOpen = false;
         clearTimeout(roundTimer);
         settingsOpen = false;
-        lives = MAX_LIVES; clearCount = 0; clearStreak = 0; maxClearStreak = 0;
-        mapSkips = MAX_MAP_SKIPS;
-        stageStart = { c: START.c, r: START.r };
-        recordSavedForRun = false; runStartTime = new Date();
-        activateItemForRun(); resetRecoil(); flash.alpha = 0;
-        walls = new Set(Array.isArray(data.walls) ? data.walls.map(String) : []);
-        goal = data.goal ? { c: Number(data.goal.c), r: Number(data.goal.r) } : null;
-        dangers = new Set(Array.isArray(data.dangers) ? data.dangers.map(String) : []);
-        resetPlayer(); mapTransition.active = false;
-        pathGuideUses = 0; pathGuidePath = [];
-        gameState = "playing";
-        if (activeItem === "pathGuide") { showPathGuide(); pathGuideUses = 1; }
-        resetOpponent(); sendMultiplayerPosition(true);
-        setMessage("경기 시작!"); updateUI();
-        return;
-    }
-    if (data.type === "roundWaiting") {
-        if (!multiplayerMatchActive) return;
-        clearTimeout(roundTimer);
-        movement = null;
-        gameState = "cleared";
-        setMessage("클리어! 상대 플레이어를 기다리는 중...");
-        updateUI();
-        return;
-    }
-    if (data.type === "nextRound") {
-        if (!multiplayerMatchActive) return;
-        if (multiplayerRole === "host") {
-            clearTimeout(roundTimer);
-            startRound();
-            multiplayerSend({
-                type: "roundMap",
-                stageStart: stageStart ? { c: stageStart.c, r: stageStart.r } : { c: START.c, r: START.r },
-                walls: [...walls],
-                goal: goal ? { c: goal.c, r: goal.r } : null,
-                dangers: [...dangers]
-            });
-            return;
+
+        const firstRound = multiplayerRound === 1;
+        if (firstRound) {
+            lives = MAX_LIVES;
+            clearCount = 0;
+            clearStreak = 0;
+            maxClearStreak = 0;
+            mapSkips = MAX_MAP_SKIPS;
+            stageStart = { c: START.c, r: START.r };
+            recordSavedForRun = false;
+            runStartTime = new Date();
+            activateItemForRun();
+            resetRecoil();
+            flash.alpha = 0;
         }
-        return;
-    }
-    if (data.type === "roundMap") {
-        if (multiplayerRole !== "guest" || !multiplayerMatchActive) return;
-        clearTimeout(roundTimer);
-        stageStart = data.stageStart ? { c: Number(data.stageStart.c), r: Number(data.stageStart.r) } : { c: START.c, r: START.r };
+
+        gameState = "playing";
+        remainingTime = TIME_LIMIT + activeTimeBonus;
+        stageStart = { c: START.c, r: START.r };
         walls = new Set(Array.isArray(data.walls) ? data.walls.map(String) : []);
         goal = data.goal ? { c: Number(data.goal.c), r: Number(data.goal.r) } : null;
         dangers = new Set(Array.isArray(data.dangers) ? data.dangers.map(String) : []);
-        remainingTime = TIME_LIMIT + activeTimeBonus;
-        movement = null;
         resetPlayer();
-        pathGuideUses = 0; pathGuidePath = [];
-        gameState = "playing";
+        mapTransition.active = false;
+        pathGuideUses = 0;
+        pathGuidePath = [];
         if (activeItem === "pathGuide") { showPathGuide(); pathGuideUses = 1; }
-        flash.alpha = 0;
-        resetOpponent(); sendMultiplayerPosition(true);
-        setMessage(`第 ${clearCount + 1}맵 시작!`);
+        resetOpponent();
+        sendMultiplayerPosition(true);
+        setMessage(multiplayerRound === 1 ? "경기 시작!" : `다음 맵 · ${multiplayerRound}라운드`);
         updateUI();
+        return;
+    }
+    if (data.type === "roundWon") {
+        if (!multiplayerMatchActive) return;
+        if (Number(data.round) !== multiplayerRound) return;
+        if (multiplayerRoundTransition) return;
+
+        multiplayerRoundTransition = true;
+        const winner = data.winner || "draw";
+
+        if (winner === multiplayerRole) {
+            clearCount++;
+            clearStreak++;
+            maxClearStreak = Math.max(maxClearStreak, clearStreak);
+            allTimeBestStreak = Math.max(allTimeBestStreak, clearStreak);
+            coins++;
+            saveCoins();
+            if (clearCount > maxClearCount) {
+                maxClearCount = clearCount;
+                localStorage.setItem("slidingMazeMaxClearCount", String(maxClearCount));
+            }
+            try {
+                localStorage.setItem("slideMazeBestStreak", String(allTimeBestStreak));
+            } catch (error) {}
+            if (activeItem === "energyShield" && clearCount % 3 === 0) {
+                shieldCharges++;
+            }
+            if (activeItem === "firstAid" && clearCount % 4 === 0) {
+                firstAidCharged = true;
+            }
+        } else if (winner !== "draw") {
+            clearStreak = 0;
+        }
+
+        movement = null;
+        if (multiplayerRole === "host") {
+            startNextMultiplayerRound();
+        } else {
+            gameState = "multiplayerWaitingRound";
+            setMessage(winner === multiplayerRole ? "클리어! 다음 맵을 준비합니다." : "상대가 먼저 클리어했습니다. 다음 맵을 기다리는 중...");
+            updateUI();
+        }
         return;
     }
     if (data.type === "matchOver") {
@@ -471,21 +492,47 @@ function handleMultiplayerMessage(data) {
 function startMultiplayerMatch() {
     if (multiplayerRole !== "host" || !multiplayerConnected || !multiplayerPeerJoined) return;
     multiplayerSeed = generateMatchSeed();
-    multiplayerMatchActive = true; multiplayerResult = null; multiplayerEliminatedSent = false;
+    multiplayerRound = 1;
+    multiplayerMatchActive = true;
+    multiplayerResult = null;
+    multiplayerEliminatedSent = false;
+    multiplayerRoundTransition = false;
     multiplayerOpen = false;
     startNewGame();
     multiplayerSend({
-        type: "matchStart", seed: multiplayerSeed,
+        type: "matchStart", round: multiplayerRound, seed: multiplayerSeed,
         walls: [...walls], goal: goal ? { c: goal.c, r: goal.r } : null,
         dangers: [...dangers]
     });
     resetOpponent(); sendMultiplayerPosition(true);
 }
 
+function startNextMultiplayerRound() {
+    if (multiplayerRole !== "host" || !multiplayerMatchActive) return;
+
+    clearTimeout(roundTimer);
+    multiplayerRound++;
+    multiplayerSeed = generateMatchSeed();
+    multiplayerEliminatedSent = false;
+    multiplayerRoundTransition = false;
+    stageStart = { c: START.c, r: START.r };
+
+    startRound();
+
+    multiplayerSend({
+        type: "matchStart", round: multiplayerRound, seed: multiplayerSeed,
+        walls: [...walls], goal: goal ? { c: goal.c, r: goal.r } : null,
+        dangers: [...dangers]
+    });
+    resetOpponent();
+    sendMultiplayerPosition(true);
+}
+
 function sendMultiplayerEliminated() {
     if (!multiplayerMatchActive || multiplayerEliminatedSent) return;
     multiplayerEliminatedSent = true;
-    multiplayerSend({ type: "eliminated" });
+    multiplayerRoundTransition = false;
+    multiplayerSend({ type: "eliminated", round: multiplayerRound });
     gameState = "multiplayerWaitingResult";
     movement = null;
     setMessage("탈락했습니다. 상대 결과를 기다리는 중...");
@@ -3773,6 +3820,16 @@ function clearGame() {
         return;
     }
 
+    if (multiplayerMatchActive) {
+        movement = null;
+        gameState = "multiplayerWaitingRound";
+        multiplayerRoundTransition = false;
+        multiplayerSend({ type: "finish", round: multiplayerRound });
+        setMessage("클리어! 상대 결과를 확인하는 중...");
+        updateUI();
+        return;
+    }
+
     stageStart = {
         c: player.c,
         r: player.r
@@ -3782,8 +3839,6 @@ function clearGame() {
         "cleared";
 
     movement = null;
-
-    if (multiplayerMatchActive) multiplayerSend({ type: "finish" });
 
     clearCount++;
 
@@ -3856,10 +3911,6 @@ function clearGame() {
     );
 
     updateUI();
-
-    if (multiplayerMatchActive) {
-        return;
-    }
 
     roundTimer =
         setTimeout(
