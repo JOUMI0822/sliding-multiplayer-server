@@ -167,7 +167,7 @@ canvas {
 <div id="gameWrapper">
 
     <div class="topbar">
-        <div id="time">시간 10.0초</div>
+        <div id="time">시간 20.0초</div>
         <div id="lives">목숨 ♥ ♥ ♥</div>
         <div id="clears">클리어 0회</div>
         <div id="equippedItemBox">
@@ -199,7 +199,21 @@ const ROWS = 15;
 const WIDTH = 800;
 const HEIGHT = 600;
 
-const TIME_LIMIT = 10;
+const TIME_LIMIT = 20;
+
+/* 클리어 횟수에 따른 제한 시간
+   0~4회: 20초 / 5~9회: 17초 / 10~19회: 15초
+   20~24회: 12초 / 25~29회: 10초 / 30회 이상: 7초
+*/
+function getStageTimeLimit() {
+    if (clearCount >= 30) return 7;
+    if (clearCount >= 25) return 10;
+    if (clearCount >= 20) return 12;
+    if (clearCount >= 10) return 15;
+    if (clearCount >= 5) return 17;
+    return 20;
+}
+
 const MAX_LIVES = 3;
 const MAX_MAP_SKIPS = 5;
 
@@ -248,11 +262,6 @@ let multiplayerMatchActive = false;
 let multiplayerResult = null;
 let multiplayerStatus = "서버 연결 중...";
 let multiplayerSendAccumulator = 0;
-let opponentLastPacketTime = 0;
-let opponentPrevTargetX = 0;
-let opponentPrevTargetY = 0;
-let opponentVelocityX = 0;
-let opponentVelocityY = 0;
 let multiplayerEliminatedSent = false;
 let multiplayerMatchmaking = false;
 let multiplayerRound = 0;
@@ -294,11 +303,6 @@ function resetOpponent() {
     opponent.y = player.y;
     opponent.targetX = player.x;
     opponent.targetY = player.y;
-    opponentPrevTargetX = player.x;
-    opponentPrevTargetY = player.y;
-    opponentVelocityX = 0;
-    opponentVelocityY = 0;
-    opponentLastPacketTime = 0;
     opponent.c = player.c;
     opponent.r = player.r;
     opponent.visible = false;
@@ -306,7 +310,7 @@ function resetOpponent() {
 
 function sendMultiplayerPosition(force = false) {
     if (!multiplayerMatchActive) return;
-    if (!force && multiplayerSendAccumulator < 0.025) return;
+    if (!force && multiplayerSendAccumulator < 0.05) return;
     multiplayerSendAccumulator = 0;
     multiplayerSend({
         type: "position",
@@ -491,18 +495,6 @@ function handleMultiplayerMessage(data) {
         if (!multiplayerMatchActive) return;
         const x = Number(data.x), y = Number(data.y);
         if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-        const now = performance.now();
-        if (opponent.visible && opponentLastPacketTime > 0) {
-            const packetDelta = Math.max(0.016, Math.min(0.2, (now - opponentLastPacketTime) / 1000));
-            opponentVelocityX = (x - opponentPrevTargetX) / packetDelta;
-            opponentVelocityY = (y - opponentPrevTargetY) / packetDelta;
-        } else {
-            opponentVelocityX = 0;
-            opponentVelocityY = 0;
-        }
-        opponentPrevTargetX = x;
-        opponentPrevTargetY = y;
-        opponentLastPacketTime = now;
         opponent.targetX = x;
         opponent.targetY = y;
         opponent.c = Number(data.c) || 0;
@@ -539,7 +531,7 @@ function handleMultiplayerMessage(data) {
         }
 
         gameState = "playing";
-        remainingTime = TIME_LIMIT + activeTimeBonus;
+        remainingTime = getStageTimeLimit() + activeTimeBonus;
         stageStart = data.startPosition && Number.isFinite(Number(data.startPosition.c)) && Number.isFinite(Number(data.startPosition.r))
             ? { c: Number(data.startPosition.c), r: Number(data.startPosition.r) }
             : { c: START.c, r: START.r };
@@ -555,25 +547,6 @@ function handleMultiplayerMessage(data) {
         sendMultiplayerPosition(true);
         setMessage(multiplayerRound === 1 ? "경기 시작!" : `다음 맵 · ${multiplayerRound}라운드`);
         updateUI();
-        return;
-    }
-    if (data.type === "advanceRound") {
-        if (!multiplayerMatchActive || multiplayerRole !== "host") return;
-        if (Number(data.round) !== multiplayerRound) return;
-        if (multiplayerRoundTransition) return;
-        multiplayerRoundTransition = true;
-        const nextStart = data.position && Number.isFinite(Number(data.position.c)) && Number.isFinite(Number(data.position.r))
-            ? { c: Number(data.position.c), r: Number(data.position.r) }
-            : { c: player.c, r: player.r };
-        startNextMultiplayerRound(nextStart);
-        return;
-    }
-    if (data.type === "playerEliminated") {
-        if (!multiplayerMatchActive) return;
-        if (Number(data.round) !== multiplayerRound) return;
-        if (data.role && data.role !== multiplayerRole) {
-            opponent.visible = false;
-        }
         return;
     }
     if (data.type === "roundWon") {
@@ -3626,7 +3599,7 @@ function startRound() {
     gameState = "playing";
 
     remainingTime =
-        TIME_LIMIT + activeTimeBonus;
+        getStageTimeLimit() + activeTimeBonus;
 
     resetPlayer();
 
@@ -3701,7 +3674,7 @@ function skipMap() {
         "playing";
 
     remainingTime =
-        TIME_LIMIT + activeTimeBonus;
+        getStageTimeLimit() + activeTimeBonus;
 
     resetPlayer();
 
@@ -4000,7 +3973,7 @@ function clearGame() {
         gameState = "multiplayerWaitingRound";
         multiplayerRoundTransition = false;
         multiplayerSend({ type: "finish", round: multiplayerRound, position: { c: player.c, r: player.r } });
-        setMessage("클리어! 다음 맵을 준비합니다...");
+        setMessage("클리어! 상대 결과를 확인하는 중...");
         updateUI();
         return;
     }
@@ -4239,7 +4212,7 @@ function timeoutGame() {
     if (tryAutoFirstAid()) {
         gameState = "playing";
         clearStreak = 0;
-        remainingTime = TIME_LIMIT + activeTimeBonus;
+        remainingTime = getStageTimeLimit() + activeTimeBonus;
         updateUI();
         return;
     }
@@ -5126,20 +5099,9 @@ function update(delta) {
     if (multiplayerMatchActive) {
         multiplayerSendAccumulator += delta;
         if (opponent.visible) {
-            const prediction = Math.min(0.08, delta * 0.9);
-            const predictedX = opponent.targetX + opponentVelocityX * prediction;
-            const predictedY = opponent.targetY + opponentVelocityY * prediction;
-            const dx = predictedX - opponent.x;
-            const dy = predictedY - opponent.y;
-            const distance = Math.hypot(dx, dy);
-            if (distance > CELL * 1.25) {
-                opponent.x = predictedX;
-                opponent.y = predictedY;
-            } else {
-                const follow = Math.min(1, delta * 32);
-                opponent.x += dx * follow;
-                opponent.y += dy * follow;
-            }
+            const follow = Math.min(1, delta * 18);
+            opponent.x += (opponent.targetX - opponent.x) * follow;
+            opponent.y += (opponent.targetY - opponent.y) * follow;
         }
     }
 
