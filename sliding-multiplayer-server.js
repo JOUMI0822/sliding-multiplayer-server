@@ -141,6 +141,8 @@ function handleMessage(ws, data) {
             host: opponent,
             guest: ws,
             winner: null,
+            round: 0,
+            roundFinished: false,
             hostEliminated: false,
             guestEliminated: false
         };
@@ -162,7 +164,15 @@ function handleMessage(ws, data) {
         if (rooms.has(roomCode)) return sendError(ws, '이미 사용 중인 방 코드입니다. 새 방을 만들어 주세요.');
         ws.roomCode = roomCode;
         ws.role = 'host';
-        rooms.set(roomCode, { host: ws, guest: null, winner: null, hostEliminated: false, guestEliminated: false });
+        rooms.set(roomCode, {
+            host: ws,
+            guest: null,
+            winner: null,
+            round: 0,
+            roundFinished: false,
+            hostEliminated: false,
+            guestEliminated: false
+        });
         send(ws, { type: 'roomCreated', room: roomCode });
         return;
     }
@@ -188,7 +198,14 @@ function handleMessage(ws, data) {
     if (!other) return;
 
     if (data.type === 'matchStart') {
-        if (ws === room.host) send(other, data);
+        if (ws === room.host) {
+            // 방장이 새 맵을 시작하면 다음 라운드 상태로 초기화합니다.
+            room.round = Number(data.round) || (room.round + 1);
+            room.roundFinished = false;
+            room.hostEliminated = false;
+            room.guestEliminated = false;
+            send(other, data);
+        }
         return;
     }
 
@@ -198,10 +215,36 @@ function handleMessage(ws, data) {
     }
 
     if (data.type === 'finish') {
-        if (room.winner) return;
-        room.winner = ws.role;
-        send(room.host, { type: 'matchOver', winner: room.winner });
-        send(room.guest, { type: 'matchOver', winner: room.winner });
+        // 클리어는 경기 종료가 아니라 현재 라운드 종료입니다.
+        // 먼저 골인한 플레이어의 위치를 다음 맵의 시작 위치로 사용합니다.
+        const round = Number(data.round);
+        if (!Number.isFinite(round) || round !== room.round) return;
+        if (room.roundFinished || room.winner) return;
+
+        room.roundFinished = true;
+
+        const nextStart = data.position && Number.isFinite(Number(data.position.c)) && Number.isFinite(Number(data.position.r))
+            ? {
+                c: Number(data.position.c),
+                r: Number(data.position.r)
+            }
+            : null;
+
+        const reason = data.reason === 'timeout' ? 'timeout' : 'clear';
+        send(room.host, {
+            type: 'roundWon',
+            round,
+            winner: ws.role,
+            reason,
+            nextStart
+        });
+        send(room.guest, {
+            type: 'roundWon',
+            round,
+            winner: ws.role,
+            reason,
+            nextStart
+        });
         return;
     }
 
