@@ -612,7 +612,9 @@ app.post("/api/ranking/score", requireAuth, async (req, res) => {
         Prefer: "return=representation"
       },
       body: {
-        id: crypto.randomUUID(),
+        // id는 Supabase 테이블의 기본값/자동 증가 설정을 사용합니다.
+        // UUID/identity 어느 쪽이든 DB 스키마에 맞게 자동 생성되도록
+        // 서버에서 임의의 UUID를 강제로 넣지 않습니다.
         account_id: req.account.id,
         clears: score.clears,
         max_streak: score.max_streak,
@@ -631,7 +633,10 @@ app.post("/api/ranking/score", requireAuth, async (req, res) => {
     });
   } catch (error) {
     console.error("SCORE SAVE ERROR:", error);
-    res.status(500).json({ error: "랭킹 점수를 저장하지 못했습니다." });
+    res.status(500).json({
+      error: "랭킹 점수를 저장하지 못했습니다.",
+      detail: error?.message || "unknown error"
+    });
   }
 });
 
