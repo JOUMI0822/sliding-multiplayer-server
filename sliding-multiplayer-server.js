@@ -1,18 +1,12 @@
 /**
- * Sliding Maze V27 - account + daily ranking server
+ * Sliding Maze V28 - Account + Daily Ranking + Weekly Ranking
  *
- * Run:
- *   npm install
- *   npm start
+ * V28 score:
+ * clears * 50 + maxStreak * 100 - skips * 10 - lifeLosses * 10
  *
- * Put the generated HTML beside this file as index.html.
- *
- * Environment:
- *   PORT=3000
- *   SESSION_DAYS=30
- *   COOKIE_SECURE=true
+ * npm install
+ * npm start
  */
-
 "use strict";
 
 const express = require("express");
@@ -21,771 +15,232 @@ const path = require("path");
 const crypto = require("crypto");
 
 const app = express();
-
 const PORT = Number(process.env.PORT || 3000);
-const SESSION_DAYS = Math.max(
-    1,
-    Number(process.env.SESSION_DAYS || 30)
-);
-const COOKIE_SECURE =
-    String(process.env.COOKIE_SECURE || "").toLowerCase() === "true";
+const SESSION_DAYS = Math.max(1, Number(process.env.SESSION_DAYS || 30));
+const COOKIE_SECURE = String(process.env.COOKIE_SECURE || "").toLowerCase() === "true";
 
 const DATA_DIR = path.join(__dirname, "data");
 const DATA_FILE = path.join(DATA_DIR, "accounts.json");
-
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-/* =========================================================
-   DATABASE
-========================================================= */
-
 function loadData() {
-    try {
-        const parsed = JSON.parse(
-            fs.readFileSync(DATA_FILE, "utf8")
-        );
-
-        return {
-            accounts:
-                parsed.accounts &&
-                typeof parsed.accounts === "object"
-                    ? parsed.accounts
-                    : {},
-
-            nicknames:
-                parsed.nicknames &&
-                typeof parsed.nicknames === "object"
-                    ? parsed.nicknames
-                    : {},
-
-            scores:
-                parsed.scores &&
-                typeof parsed.scores === "object"
-                    ? parsed.scores
-                    : {}
-        };
-    } catch {
-        return {
-            accounts: {},
-            nicknames: {},
-            scores: {}
-        };
-    }
-}
-
-let db = loadData();
-
-function saveData() {
-    const tempFile = DATA_FILE + ".tmp";
-
-    fs.writeFileSync(
-        tempFile,
-        JSON.stringify(db, null, 2),
-        "utf8"
-    );
-
-    fs.renameSync(tempFile, DATA_FILE);
-}
-
-/* =========================================================
-   VALIDATION
-========================================================= */
-
-function normalizeId(value) {
-    return String(value || "")
-        .trim()
-        .toLowerCase();
-}
-
-function normalizeNickname(value) {
-    return String(value || "")
-        .trim()
-        .toLowerCase();
-}
-
-function validId(id) {
-    return /^[A-Za-z0-9_]{3,24}$/.test(id);
-}
-
-function validNickname(nickname) {
-    if (!nickname) return false;
-
-    if (nickname.length < 2) return false;
-    if (nickname.length > 16) return false;
-
-    if (/[\u0000-\u001F\u007F]/.test(nickname)) {
-        return false;
-    }
-
-    return true;
-}
-
-/* =========================================================
-   PASSWORD HASHING
-========================================================= */
-
-function hashPassword(
-    password,
-    salt = crypto.randomBytes(16).toString("hex")
-) {
-    const hash = crypto
-        .scryptSync(String(password), salt, 64)
-        .toString("hex");
-
+  try {
+    const x = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
     return {
-        salt,
-        hash
+      accounts: x.accounts && typeof x.accounts === "object" ? x.accounts : {},
+      nicknames: x.nicknames && typeof x.nicknames === "object" ? x.nicknames : {},
+      scores: x.scores && typeof x.scores === "object" ? x.scores : {}
     };
+  } catch (_) {
+    return { accounts: {}, nicknames: {}, scores: {} };
+  }
+}
+let db = loadData();
+function saveData() {
+  const tmp = DATA_FILE + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(db, null, 2), "utf8");
+  fs.renameSync(tmp, DATA_FILE);
 }
 
+function normalizeId(v) { return String(v || "").trim().toLowerCase(); }
+function normalizeNickname(v) { return String(v || "").trim().toLowerCase(); }
+function validId(v) { return /^[A-Za-z0-9_]{3,24}$/.test(v); }
+function validNickname(v) { return v.length >= 2 && v.length <= 16 && !/[\u0000-\u001F\u007F]/.test(v); }
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
+  return { salt, hash: crypto.scryptSync(String(password), salt, 64).toString("hex") };
+}
 function verifyPassword(password, stored) {
-    try {
-        const result = hashPassword(
-            password,
-            stored.salt
-        );
-
-        return crypto.timingSafeEqual(
-            Buffer.from(result.hash, "hex"),
-            Buffer.from(stored.hash, "hex")
-        );
-    } catch {
-        return false;
-    }
-}
-
-/* =========================================================
-   SESSION
-========================================================= */
-
-function randomToken() {
-    return crypto.randomBytes(32).toString("base64url");
+  try {
+    if (!stored || !stored.salt || !stored.hash) return false;
+    const a = Buffer.from(hashPassword(password, stored.salt).hash, "hex");
+    const b = Buffer.from(stored.hash, "hex");
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  } catch (_) { return false; }
 }
 
 const sessions = new Map();
-
 function createSession(accountId) {
-    const token = randomToken();
-
-    sessions.set(token, {
-        accountId,
-        expiresAt:
-            Date.now() +
-            SESSION_DAYS * 24 * 60 * 60 * 1000
-    });
-
-    return token;
+  const token = crypto.randomBytes(32).toString("base64url");
+  sessions.set(token, { accountId, expiresAt: Date.now() + SESSION_DAYS * 86400000 });
+  return token;
 }
-
 function parseCookies(header) {
-    const result = {};
-
-    String(header || "")
-        .split(";")
-        .forEach(part => {
-            const index = part.indexOf("=");
-
-            if (index < 0) return;
-
-            const key = part
-                .slice(0, index)
-                .trim();
-
-            const value = decodeURIComponent(
-                part
-                    .slice(index + 1)
-                    .trim()
-            );
-
-            result[key] = value;
-        });
-
-    return result;
+  const out = {};
+  String(header || "").split(";").forEach(p => {
+    const i = p.indexOf("=");
+    if (i < 0) return;
+    let v = p.slice(i + 1).trim();
+    try { v = decodeURIComponent(v); } catch (_) {}
+    out[p.slice(0, i).trim()] = v;
+  });
+  return out;
 }
-
 function getSession(req) {
-    const cookies = parseCookies(
-        req.headers.cookie
-    );
-
-    const token = cookies.sliding_session;
-
-    if (!token) {
-        return null;
-    }
-
-    const session = sessions.get(token);
-
-    if (!session) {
-        return null;
-    }
-
-    if (session.expiresAt <= Date.now()) {
-        sessions.delete(token);
-        return null;
-    }
-
-    return {
-        token,
-        ...session
-    };
+  const token = parseCookies(req.headers.cookie).sliding_session;
+  if (!token) return null;
+  const s = sessions.get(token);
+  if (!s) return null;
+  if (s.expiresAt <= Date.now()) { sessions.delete(token); return null; }
+  return { token, ...s };
 }
-
 function setSessionCookie(res, token) {
-    const parts = [
-        `sliding_session=${encodeURIComponent(token)}`,
-        "HttpOnly",
-        "SameSite=Lax",
-        `Max-Age=${SESSION_DAYS * 86400}`,
-        "Path=/"
-    ];
-
-    if (COOKIE_SECURE) {
-        parts.push("Secure");
-    }
-
-    res.setHeader(
-        "Set-Cookie",
-        parts.join("; ")
-    );
+  const p = [`sliding_session=${encodeURIComponent(token)}`, "HttpOnly", "SameSite=Lax", `Max-Age=${SESSION_DAYS * 86400}`, "Path=/"];
+  if (COOKIE_SECURE) p.push("Secure");
+  res.setHeader("Set-Cookie", p.join("; "));
 }
-
 function clearSessionCookie(res) {
-    const parts = [
-        "sliding_session=",
-        "HttpOnly",
-        "SameSite=Lax",
-        "Max-Age=0",
-        "Path=/"
-    ];
-
-    if (COOKIE_SECURE) {
-        parts.push("Secure");
-    }
-
-    res.setHeader(
-        "Set-Cookie",
-        parts.join("; ")
-    );
+  const p = ["sliding_session=", "HttpOnly", "SameSite=Lax", "Max-Age=0", "Path=/"];
+  if (COOKIE_SECURE) p.push("Secure");
+  res.setHeader("Set-Cookie", p.join("; "));
 }
-
 function requireAuth(req, res, next) {
-    const session = getSession(req);
-
-    if (!session) {
-        return res.status(401).json({
-            error: "로그인이 필요합니다."
-        });
-    }
-
-    const account =
-        db.accounts[session.accountId];
-
-    if (!account) {
-        return res.status(401).json({
-            error: "계정을 찾을 수 없습니다."
-        });
-    }
-
-    req.account = account;
-    req.session = session;
-
-    next();
+  const s = getSession(req);
+  if (!s || !db.accounts[s.accountId]) return res.status(401).json({ error: "로그인이 필요합니다." });
+  req.session = s;
+  req.account = db.accounts[s.accountId];
+  next();
 }
 
-/* =========================================================
-   DATE
-========================================================= */
+function dateKey(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+function startOfWeek(d = new Date()) {
+  const x = new Date(d);
+  x.setHours(0,0,0,0);
+  const day = x.getDay();
+  const diff = day === 0 ? -6 : 1 - day; // Monday start
+  x.setDate(x.getDate() + diff);
+  return x;
+}
+function weekKey(d = new Date()) { return dateKey(startOfWeek(d)); }
 
-function todayKey() {
-    const d = new Date();
-
-    const year = d.getFullYear();
-
-    const month = String(
-        d.getMonth() + 1
-    ).padStart(2, "0");
-
-    const day = String(
-        d.getDate()
-    ).padStart(2, "0");
-
-    return `${year}-${month}-${day}`;
+function calculateScore(clears, maxStreak, skips, lifeLosses) {
+  const c = Math.max(0, Math.min(100000, Math.floor(Number(clears) || 0)));
+  const s = Math.max(0, Math.min(c, Math.floor(Number(maxStreak) || 0)));
+  const k = Math.max(0, Math.min(100000, Math.floor(Number(skips) || 0)));
+  const l = Math.max(0, Math.min(100000, Math.floor(Number(lifeLosses) || 0)));
+  return Math.max(0, c * 50 + s * 100 - k * 10 - l * 10);
 }
 
-/* =========================================================
-   EXPRESS
-========================================================= */
-
-app.use(
-    express.json({
-        limit: "16kb"
-    })
-);
-
-/* =========================================================
-   REGISTER
-========================================================= */
+app.use(express.json({ limit: "16kb" }));
 
 app.post("/api/register", (req, res) => {
-    const id = normalizeId(req.body.id);
-
-    const nickname = String(
-        req.body.nickname || ""
-    ).trim();
-
-    const nicknameKey =
-        normalizeNickname(nickname);
-
-    const password = String(
-        req.body.password || ""
-    );
-
-    if (!validId(id)) {
-        return res.status(400).json({
-            error:
-                "아이디는 영문/숫자/_ 3~24자로 입력해주세요."
-        });
-    }
-
-    if (
-        password.length < 8 ||
-        password.length > 72
-    ) {
-        return res.status(400).json({
-            error:
-                "비밀번호는 8~72자로 입력해주세요."
-        });
-    }
-
-    if (!validNickname(nickname)) {
-        return res.status(400).json({
-            error:
-                "닉네임은 2~16자로 입력해주세요."
-        });
-    }
-
-    if (db.accounts[id]) {
-        return res.status(409).json({
-            error:
-                "이미 사용 중인 아이디입니다."
-        });
-    }
-
-    if (db.nicknames[nicknameKey]) {
-        return res.status(409).json({
-            error:
-                "이미 사용 중인 닉네임입니다."
-        });
-    }
-
-    const passwordData =
-        hashPassword(password);
-
-    const account = {
-        id,
-        nickname,
-        nicknameKey,
-        password: passwordData,
-        createdAt:
-            new Date().toISOString()
-    };
-
-    db.accounts[id] = account;
-
-    db.nicknames[nicknameKey] = id;
-
-    saveData();
-
-    const token =
-        createSession(id);
-
-    setSessionCookie(
-        res,
-        token
-    );
-
-    res.json({
-        user: {
-            id: account.id,
-            nickname: account.nickname
-        }
-    });
+  const id = normalizeId(req.body.id);
+  const nickname = String(req.body.nickname || "").trim();
+  const nk = normalizeNickname(nickname);
+  const password = String(req.body.password || "");
+  if (!validId(id)) return res.status(400).json({ error: "아이디는 영문/숫자/_ 3~24자로 입력해주세요." });
+  if (password.length < 8 || password.length > 72) return res.status(400).json({ error: "비밀번호는 8~72자로 입력해주세요." });
+  if (!validNickname(nickname)) return res.status(400).json({ error: "닉네임은 2~16자로 입력해주세요." });
+  if (db.accounts[id]) return res.status(409).json({ error: "이미 사용 중인 아이디입니다." });
+  if (db.nicknames[nk]) return res.status(409).json({ error: "이미 사용 중인 닉네임입니다." });
+  db.accounts[id] = { id, nickname, nicknameKey: nk, password: hashPassword(password), createdAt: new Date().toISOString() };
+  db.nicknames[nk] = id;
+  saveData();
+  setSessionCookie(res, createSession(id));
+  res.json({ user: { id, nickname } });
 });
-
-/* =========================================================
-   LOGIN
-========================================================= */
 
 app.post("/api/login", (req, res) => {
-    const id = normalizeId(
-        req.body.id
-    );
-
-    const password = String(
-        req.body.password || ""
-    );
-
-    const account =
-        db.accounts[id];
-
-    if (
-        !account ||
-        !verifyPassword(
-            password,
-            account.password
-        )
-    ) {
-        return res.status(401).json({
-            error:
-                "아이디 또는 비밀번호가 올바르지 않습니다."
-        });
-    }
-
-    const token =
-        createSession(id);
-
-    setSessionCookie(
-        res,
-        token
-    );
-
-    res.json({
-        user: {
-            id: account.id,
-            nickname: account.nickname
-        }
-    });
+  const id = normalizeId(req.body.id);
+  const account = db.accounts[id];
+  if (!account || !verifyPassword(String(req.body.password || ""), account.password)) return res.status(401).json({ error: "아이디 또는 비밀번호가 올바르지 않습니다." });
+  setSessionCookie(res, createSession(id));
+  res.json({ user: { id: account.id, nickname: account.nickname } });
 });
 
-/* =========================================================
-   CURRENT USER
-========================================================= */
+app.get("/api/me", requireAuth, (req, res) => res.json({ id: req.account.id, nickname: req.account.nickname }));
+app.post("/api/logout", (req, res) => {
+  const s = getSession(req);
+  if (s) sessions.delete(s.token);
+  clearSessionCookie(res);
+  res.json({ ok: true });
+});
 
-app.get(
-    "/api/me",
-    requireAuth,
-    (req, res) => {
-        res.json({
-            id: req.account.id,
-            nickname:
-                req.account.nickname
-        });
-    }
-);
+function rankingRows(scope) {
+  const today = dateKey();
+  const week = weekKey();
+  const rows = Object.values(db.scores).filter(r => scope === "daily" ? r.date === today : r.week === week);
+  rows.sort((a,b) => b.score-a.score || b.maxStreak-a.maxStreak || b.clears-a.clears || a.lifeLosses-b.lifeLosses || a.skips-b.skips || String(a.nickname).localeCompare(String(b.nickname)));
+  return rows;
+}
+function formatRanking(rows, accountId) {
+  return rows.slice(0,100).map((r,i) => ({ rank:i+1, nickname:r.nickname, score:r.score, clears:r.clears, maxStreak:r.maxStreak, skips:r.skips, lifeLosses:r.lifeLosses, me:r.accountId===accountId }));
+}
 
-/* =========================================================
-   LOGOUT
-========================================================= */
+app.get("/api/ranking/today", requireAuth, (req,res) => {
+  const rows = rankingRows("daily");
+  const idx = rows.findIndex(r => r.accountId === req.account.id);
+  res.json({ date: dateKey(), ranking: formatRanking(rows, req.account.id), mine: idx >= 0 ? { rank:idx+1, ...rows[idx] } : null });
+});
 
-app.post(
-    "/api/logout",
-    (req, res) => {
-        const session =
-            getSession(req);
+app.get("/api/ranking/weekly", requireAuth, (req,res) => {
+  const rows = rankingRows("weekly");
+  const idx = rows.findIndex(r => r.accountId === req.account.id);
+  res.json({ week: weekKey(), weekEnds: dateKey(new Date(startOfWeek().getTime()+6*86400000)), ranking: formatRanking(rows, req.account.id), mine: idx >= 0 ? { rank:idx+1, ...rows[idx] } : null });
+});
 
-        if (session) {
-            sessions.delete(
-                session.token
-            );
-        }
+app.post("/api/ranking/score", requireAuth, (req,res) => {
+  const clears = Number(req.body.clears);
+  const maxStreak = Number(req.body.maxStreak);
+  const skips = Number(req.body.skips);
+  const lifeLosses = Number(req.body.lifeLosses);
+  if (![clears,maxStreak,skips,lifeLosses].every(Number.isFinite)) return res.status(400).json({ error:"잘못된 게임 기록입니다." });
+  const c = Math.max(0, Math.min(100000, Math.floor(clears)));
+  const s = Math.max(0, Math.min(c, Math.floor(maxStreak)));
+  const k = Math.max(0, Math.min(100000, Math.floor(skips)));
+  const l = Math.max(0, Math.min(100000, Math.floor(lifeLosses)));
+  const score = calculateScore(c,s,k,l);
+  const date = dateKey();
+  const week = weekKey();
+  const key = `${date}:${req.account.id}`;
+  const old = db.scores[key];
+  const candidate = { date, week, accountId:req.account.id, nickname:req.account.nickname, score, clears:c, maxStreak:s, skips:k, lifeLosses:l, updatedAt:new Date().toISOString() };
+  const better = !old || score > old.score || (score === old.score && s > old.maxStreak) || (score === old.score && s === old.maxStreak && c > old.clears) || (score === old.score && s === old.maxStreak && c === old.clears && l < old.lifeLosses) || (score === old.score && s === old.maxStreak && c === old.clears && l === old.lifeLosses && k < old.skips);
+  if (better) { db.scores[key] = candidate; saveData(); }
+  res.json({ saved:better, score:better ? score : old.score, record:better ? candidate : old });
+});
 
-        clearSessionCookie(res);
+app.get("/api/ranking/me", requireAuth, (req,res) => {
+  const rows = rankingRows("daily");
+  const idx = rows.findIndex(r => r.accountId === req.account.id);
+  const key = `${dateKey()}:${req.account.id}`;
+  res.json({ record:db.scores[key] || null, rank:idx >= 0 ? idx+1 : null });
+});
 
-        res.json({
-            ok: true
-        });
-    }
-);
+app.get("/api/ranking/weekly/me", requireAuth, (req,res) => {
+  const rows = rankingRows("weekly");
+  const idx = rows.findIndex(r => r.accountId === req.account.id);
+  const records = Object.values(db.scores).filter(r => r.week === weekKey() && r.accountId === req.account.id);
+  records.sort((a,b)=>b.score-a.score);
+  res.json({ record:records[0] || null, rank:idx >= 0 ? idx+1 : null });
+});
 
-/* =========================================================
-   DAILY RANKING
-========================================================= */
+app.get("/api/health", (req,res) => res.json({ ok:true, version:"V28", dailyRanking:true, weeklyRanking:true, scoreFormula:"clears * 50 + maxStreak * 100 - skips * 10 - lifeLosses * 10" }));
 
-app.get(
-    "/api/ranking/today",
-    requireAuth,
-    (req, res) => {
-        const date = todayKey();
+setInterval(() => {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate()-35);
+  const key = dateKey(cutoff);
+  let changed=false;
+  for (const [k,r] of Object.entries(db.scores)) {
+    if (!r || !r.date || r.date < key) { delete db.scores[k]; changed=true; }
+  }
+  if (changed) saveData();
+}, 6*60*60*1000);
 
-        const rows =
-            Object.values(db.scores)
-                .filter(
-                    row =>
-                        row.date === date
-                )
-                .sort(
-                    (a, b) =>
-                        b.score - a.score ||
-                        b.maxStreak -
-                            a.maxStreak ||
-                        a.nickname.localeCompare(
-                            b.nickname
-                        )
-                );
+setInterval(() => {
+  const now=Date.now();
+  for (const [token,s] of sessions) if (!s || s.expiresAt<=now) sessions.delete(token);
+}, 60*60*1000);
 
-        const ranking =
-            rows
-                .slice(0, 100)
-                .map(
-                    (row, index) => ({
-                        rank: index + 1,
-                        nickname:
-                            row.nickname,
-                        score:
-                            row.score,
-                        clears:
-                            row.clears,
-                        maxStreak:
-                            row.maxStreak,
-                        me:
-                            row.accountId ===
-                            req.account.id
-                    })
-                );
+app.use(express.static(__dirname));
+app.get("*", (req,res) => res.sendFile(path.join(__dirname,"index.html")));
 
-        const mineIndex =
-            rows.findIndex(
-                row =>
-                    row.accountId ===
-                    req.account.id
-            );
-
-        const mine =
-            mineIndex >= 0
-                ? {
-                      rank:
-                          mineIndex + 1,
-                      score:
-                          rows[mineIndex]
-                              .score,
-                      clears:
-                          rows[mineIndex]
-                              .clears,
-                      maxStreak:
-                          rows[mineIndex]
-                              .maxStreak
-                  }
-                : null;
-
-        res.json({
-            date,
-            ranking,
-            mine
-        });
-    }
-);
-
-/* =========================================================
-   SAVE DAILY SCORE
-========================================================= */
-
-app.post(
-    "/api/ranking/score",
-    requireAuth,
-    (req, res) => {
-        const score =
-            Number(req.body.score);
-
-        const clears =
-            Number(req.body.clears);
-
-        const maxStreak =
-            Number(
-                req.body.maxStreak
-            );
-
-        if (
-            !Number.isFinite(score) ||
-            !Number.isFinite(clears) ||
-            !Number.isFinite(maxStreak)
-        ) {
-            return res.status(400).json({
-                error:
-                    "잘못된 점수 데이터입니다."
-            });
-        }
-
-        const safeClears =
-            Math.max(
-                0,
-                Math.min(
-                    100000,
-                    Math.floor(clears)
-                )
-            );
-
-        const safeStreak =
-            Math.max(
-                0,
-                Math.min(
-                    safeClears,
-                    Math.floor(
-                        maxStreak
-                    )
-                )
-            );
-
-        const safeScore =
-            Math.max(
-                0,
-                Math.min(
-                    15000000,
-                    Math.floor(score)
-                )
-            );
-
-        const expectedUpperBound =
-            safeClears * 100 +
-            safeStreak * 50;
-
-        if (
-            safeScore >
-            expectedUpperBound
-        ) {
-            return res.status(400).json({
-                error:
-                    "점수 값이 게임 기록과 맞지 않습니다."
-            });
-        }
-
-        const date =
-            todayKey();
-
-        const key =
-            `${date}:${req.account.id}`;
-
-        const old =
-            db.scores[key];
-
-        const candidate = {
-            date,
-            accountId:
-                req.account.id,
-            nickname:
-                req.account.nickname,
-            score:
-                safeScore,
-            clears:
-                safeClears,
-            maxStreak:
-                safeStreak,
-            updatedAt:
-                new Date().toISOString()
-        };
-
-        /*
-         * 오늘의 최고 기록만 저장합니다.
-         */
-
-        if (
-            !old ||
-            candidate.score >
-                old.score ||
-            (
-                candidate.score ===
-                    old.score &&
-                candidate.maxStreak >
-                    old.maxStreak
-            )
-        ) {
-            db.scores[key] =
-                candidate;
-
-            saveData();
-
-            return res.json({
-                saved: true,
-                score:
-                    candidate.score
-            });
-        }
-
-        res.json({
-            saved: false,
-            score: old.score
-        });
-    }
-);
-
-/* =========================================================
-   OLD RANKING CLEANUP
-========================================================= */
-
-setInterval(
-    () => {
-        const cutoff =
-            new Date();
-
-        cutoff.setDate(
-            cutoff.getDate() -
-                35
-        );
-
-        const cutoffKey =
-            `${cutoff.getFullYear()}-${String(
-                cutoff.getMonth() + 1
-            ).padStart(2, "0")}-${String(
-                cutoff.getDate()
-            ).padStart(2, "0")}`;
-
-        let changed = false;
-
-        for (
-            const [key, row]
-            of Object.entries(
-                db.scores
-            )
-        ) {
-            if (
-                row.date <
-                cutoffKey
-            ) {
-                delete db.scores[key];
-                changed = true;
-            }
-        }
-
-        if (changed) {
-            saveData();
-        }
-    },
-    6 * 60 * 60 * 1000
-);
-
-/* =========================================================
-   STATIC GAME FILES
-========================================================= */
-
-app.use(
-    express.static(__dirname)
-);
-
-/* =========================================================
-   FALLBACK
-========================================================= */
-
-app.get(
-    "*",
-    (req, res) => {
-        res.sendFile(
-            path.join(
-                __dirname,
-                "index.html"
-            )
-        );
-    }
-);
-
-/* =========================================================
-   START
-========================================================= */
-
-app.listen(
-    PORT,
-    () => {
-        console.log(
-            `Sliding Maze account/ranking server running on port ${PORT}`
-        );
-    }
-);
+app.listen(PORT, () => {
+  console.log(`Sliding Maze V28 server running on port ${PORT}`);
+  console.log("Daily ranking: ON");
+  console.log("Weekly ranking: ON (Monday-Sunday)");
+  console.log("Score: clears*50 + maxStreak*100 - skips*10 - lifeLosses*10");
+});
