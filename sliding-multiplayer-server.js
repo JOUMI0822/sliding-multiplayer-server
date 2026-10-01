@@ -18,6 +18,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const SESSION_DAYS = Math.max(1, Number(process.env.SESSION_DAYS || 30));
 const COOKIE_SECURE = String(process.env.COOKIE_SECURE || "").toLowerCase() === "true";
+const ALLOWED_ORIGIN = String(process.env.ALLOWED_ORIGIN || "").trim();
 
 const DATA_DIR = path.join(__dirname, "data");
 const DATA_FILE = path.join(DATA_DIR, "accounts.json");
@@ -85,12 +86,12 @@ function getSession(req) {
   return { token, ...s };
 }
 function setSessionCookie(res, token) {
-  const p = [`sliding_session=${encodeURIComponent(token)}`, "HttpOnly", "SameSite=Lax", `Max-Age=${SESSION_DAYS * 86400}`, "Path=/"];
+  const p = [`sliding_session=${encodeURIComponent(token)}`, "HttpOnly", "SameSite=None", `Max-Age=${SESSION_DAYS * 86400}`, "Path=/"];
   if (COOKIE_SECURE) p.push("Secure");
   res.setHeader("Set-Cookie", p.join("; "));
 }
 function clearSessionCookie(res) {
-  const p = ["sliding_session=", "HttpOnly", "SameSite=Lax", "Max-Age=0", "Path=/"];
+  const p = ["sliding_session=", "HttpOnly", "SameSite=None", "Max-Age=0", "Path=/"];
   if (COOKIE_SECURE) p.push("Secure");
   res.setHeader("Set-Cookie", p.join("; "));
 }
@@ -122,6 +123,24 @@ function calculateScore(clears, maxStreak, skips, lifeLosses) {
   const l = Math.max(0, Math.min(100000, Math.floor(Number(lifeLosses) || 0)));
   return Math.max(0, c * 50 + s * 100 - k * 10 - l * 10);
 }
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+
+  if (ALLOWED_ORIGIN && origin === ALLOWED_ORIGIN) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  }
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
 
 app.use(express.json({ limit: "16kb" }));
 
