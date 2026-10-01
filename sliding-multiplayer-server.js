@@ -55,21 +55,54 @@ app.disable("x-powered-by");
 app.use(express.json({ limit: "16kb" }));
 
 /* =========================================================
+   Request / CORS diagnostics
+   - Logs request method/path/origin without passwords or tokens.
+   - Adds a request id so one login attempt can be traced in Render logs.
+========================================================= */
+
+function makeRequestId() {
+  return crypto.randomBytes(6).toString("hex");
+}
+
+app.use((req, res, next) => {
+  const requestId = String(req.headers["x-request-id"] || req.headers["rndr-id"] || makeRequestId());
+  const origin = String(req.headers.origin || "(none)");
+
+  req.requestId = requestId;
+  res.setHeader("X-Request-Debug-Id", requestId);
+
+  console.log(`[HTTP ${requestId}] ${req.method} ${req.path} origin=${origin}`);
+
+  res.on("finish", () => {
+    console.log(`[HTTP ${requestId}] RESPONSE ${res.statusCode} ${req.method} ${req.path}`);
+  });
+
+  next();
+});
+
+/* =========================================================
    CORS
 ========================================================= */
 
 app.use((req, res, next) => {
   const origin = req.headers.origin;
+  const requestId = req.requestId || "unknown";
 
   if (origin && origin === ALLOWED_ORIGIN) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
     res.setHeader("Access-Control-Allow-Credentials", "true");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    console.log(`[CORS ${requestId}] ALLOWED origin=${origin}`);
+  } else if (origin) {
+    console.warn(`[CORS ${requestId}] BLOCKED origin=${origin} expected=${ALLOWED_ORIGIN}`);
+  } else {
+    console.log(`[CORS ${requestId}] NO_ORIGIN`);
   }
 
   if (req.method === "OPTIONS") {
+    console.log(`[CORS ${requestId}] PREFLIGHT method=${req.headers["access-control-request-method"] || "(none)"} headers=${req.headers["access-control-request-headers"] || "(none)"}`);
     return res.status(204).end();
   }
 
@@ -515,13 +548,34 @@ app.post("/api/register", async (req, res) => {
 ========================================================= */
 
 app.post("/api/login", async (req, res) => {
+  const requestId = req.requestId || "unknown";
+
   try {
     const id = normalizeId(req.body?.id);
     const password = String(req.body?.password || "");
 
-    const account = await selectOneAccountById(id);
+    console.log(`[LOGIN ${requestId}] START id=${id || "(empty)"} passwordLength=${password.length}`);
 
-    if (!account || !verifyPassword(password, account.password_hash)) {
+    if (!id || !password) {
+      console.warn(`[LOGIN ${requestId}] BAD_INPUT idPresent=${!!id} passwordPresent=${!!password}`);
+      return res.status(400).json({ error: "아이디와 비밀번호를 입력해주세요." });
+    }
+
+    const account = await selectOneAccountById(id);
+    console.log(`[LOGIN ${requestId}] ACCOUNT_FOUND=${!!account}`);
+
+    if (!account) {
+      console.warn(`[LOGIN ${requestId}] ACCOUNT_NOT_FOUND id=${id}`);
+      return res
+        .status(401)
+        .json({ error: "아이디 또는 비밀번호가 올바르지 않습니다." });
+    }
+
+    const passwordValid = verifyPassword(password, account.password_hash);
+    console.log(`[LOGIN ${requestId}] PASSWORD_VALID=${passwordValid}`);
+
+    if (!passwordValid) {
+      console.warn(`[LOGIN ${requestId}] PASSWORD_MISMATCH id=${id}`);
       return res
         .status(401)
         .json({ error: "아이디 또는 비밀번호가 올바르지 않습니다." });
@@ -529,6 +583,8 @@ app.post("/api/login", async (req, res) => {
 
     const token = createSessionToken(account.id);
     setSessionCookie(res, token);
+
+    console.log(`[LOGIN ${requestId}] SUCCESS accountId=${account.id} nickname=${account.nickname}`);
 
     return res.json({
       ok: true,
@@ -538,7 +594,11 @@ app.post("/api/login", async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("LOGIN ERROR:", error);
+    console.error(`[LOGIN ${requestId}] ERROR`, error);
+    console.error(`[LOGIN ${requestId}] ERROR_MESSAGE`, error?.message || String(error));
+    if (error?.supabase) {
+      console.error(`[LOGIN ${requestId}] SUPABASE_ERROR`, JSON.stringify(error.supabase));
+    }
     return res.status(500).json({ error: "로그인 처리 중 오류가 발생했습니다." });
   }
 });
