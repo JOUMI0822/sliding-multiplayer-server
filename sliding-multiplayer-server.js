@@ -298,6 +298,7 @@ function setSessionCookie(res, token) {
       "HttpOnly",
       "Secure",
       "SameSite=None",
+      "Partitioned",
       `Max-Age=${maxAge}`,
       "Path=/"
     ].join("; ")
@@ -312,6 +313,7 @@ function clearSessionCookie(res) {
       "HttpOnly",
       "Secure",
       "SameSite=None",
+      "Partitioned",
       "Max-Age=0",
       "Path=/"
     ].join("; ")
@@ -323,6 +325,10 @@ async function requireAuth(req, res, next) {
     const session = getSessionPayload(req);
 
     if (!session) {
+      console.warn("AUTH FAILED: sliding_session cookie missing or invalid", {
+        origin: req.headers.origin || "",
+        hasCookieHeader: Boolean(req.headers.cookie)
+      });
       return res.status(401).json({ error: "로그인이 필요합니다." });
     }
 
@@ -407,6 +413,20 @@ function weekKey(date = new Date()) {
 function nextDayUtc(date) {
   return new Date(date.getTime() + 86400000);
 }
+
+/* =========================================================
+   Request diagnostics (no secrets/cookies logged)
+========================================================= */
+
+app.use((req, res, next) => {
+  if (req.path.startsWith("/api/ranking") || req.path === "/api/login" || req.path === "/api/me") {
+    console.log("API REQUEST", req.method, req.path, {
+      origin: req.headers.origin || "",
+      hasCookieHeader: Boolean(req.headers.cookie)
+    });
+  }
+  next();
+});
 
 /* =========================================================
    Health
