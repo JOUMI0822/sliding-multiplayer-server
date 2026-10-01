@@ -661,19 +661,12 @@ function parseScoreBody(body) {
 ========================================================= */
 
 app.post("/api/ranking/score", requireAuth, async (req, res) => {
-  const requestId = req.requestId || "unknown";
-
   try {
     const score = parseScoreBody(req.body);
 
     if (!score) {
-      console.warn(`[RANKING SAVE ${requestId}] INVALID_SCORE accountId=${req.account.id}`);
       return res.status(400).json({ error: "잘못된 게임 기록입니다." });
     }
-
-    console.log(
-      `[RANKING SAVE ${requestId}] START accountId=${req.account.id} clears=${score.clears} maxStreak=${score.max_streak} skips=${score.skips} lifeLosses=${score.life_losses} score=${score.score}`
-    );
 
     const rows = await supabaseRequest("game_scores", {
       method: "POST",
@@ -682,7 +675,7 @@ app.post("/api/ranking/score", requireAuth, async (req, res) => {
         Prefer: "return=representation"
       },
       body: {
-        id: crypto.randomUUID(),
+        // game_scores.id가 bigint identity라 DB가 자동 생성하도록 id는 보내지 않습니다.
         account_id: req.account.id,
         clears: score.clears,
         max_streak: score.max_streak,
@@ -694,28 +687,13 @@ app.post("/api/ranking/score", requireAuth, async (req, res) => {
 
     const saved = Array.isArray(rows) ? rows[0] : rows;
 
-    if (!saved?.id) {
-      throw new Error("Supabase가 저장된 게임 기록을 반환하지 않았습니다.");
-    }
-
-    console.log(
-      `[RANKING SAVE ${requestId}] SUCCESS id=${saved.id} accountId=${saved.account_id} score=${saved.score} created_at=${saved.created_at || "(null)"}`
-    );
-
-    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
-    res.setHeader("Pragma", "no-cache");
-    res.setHeader("Expires", "0");
-
     res.json({
       saved: true,
-      score: Number(saved.score) || score.score,
-      record: saved
+      score: score.score,
+      record: saved || score
     });
   } catch (error) {
-    console.error(`[RANKING SAVE ${requestId}] ERROR`, error);
-    if (error?.supabase) {
-      console.error(`[RANKING SAVE ${requestId}] SUPABASE_ERROR`, JSON.stringify(error.supabase));
-    }
+    console.error("SCORE SAVE ERROR:", error);
     res.status(500).json({ error: "랭킹 점수를 저장하지 못했습니다." });
   }
 });
@@ -822,13 +800,7 @@ async function buildRanking(scope) {
 
   const scores = await getScoresBetween(start, end);
   const accountsById = await getAccountsForScoreRows(scores);
-  const ranking = aggregateBestScores(scores, accountsById);
-
-  console.log(
-    `[RANKING BUILD] scope=${scope} start=${start.toISOString()} end=${end.toISOString()} scores=${scores.length} accounts=${accountsById.size} ranking=${ranking.length}`
-  );
-
-  return ranking;
+  return aggregateBestScores(scores, accountsById);
 }
 
 function publicRanking(rows, accountId) {
@@ -850,22 +822,18 @@ function publicRanking(rows, accountId) {
 
 app.get("/api/ranking/today", requireAuth, async (req, res) => {
   try {
-    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
-    res.setHeader("Pragma", "no-cache");
-    res.setHeader("Expires", "0");
     const rows = await buildRanking("daily");
     const mineIndex = rows.findIndex(
       row => row.accountId === String(req.account.id)
     );
 
-    const ranking = publicRanking(rows, req.account.id);
-    const mine = mineIndex >= 0 ? { rank: mineIndex + 1, ...rows[mineIndex] } : null;
-    console.log(`[RANKING TODAY] accountId=${req.account.id} rows=${rows.length} mineRank=${mine?.rank || "none"} mineScore=${mine?.score ?? "none"}`);
-
     res.json({
       date: dateKey(),
-      ranking,
-      mine
+      ranking: publicRanking(rows, req.account.id),
+      mine:
+        mineIndex >= 0
+          ? { rank: mineIndex + 1, ...rows[mineIndex] }
+          : null
     });
   } catch (error) {
     console.error("DAILY RANKING ERROR:", error);
@@ -879,9 +847,6 @@ app.get("/api/ranking/today", requireAuth, async (req, res) => {
 
 app.get("/api/ranking/weekly", requireAuth, async (req, res) => {
   try {
-    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
-    res.setHeader("Pragma", "no-cache");
-    res.setHeader("Expires", "0");
     const rows = await buildRanking("weekly");
     const mineIndex = rows.findIndex(
       row => row.accountId === String(req.account.id)
@@ -890,15 +855,14 @@ app.get("/api/ranking/weekly", requireAuth, async (req, res) => {
     const weekStart = startOfWeekKst(new Date());
     const weekEnd = new Date(weekStart.getTime() + 6 * 86400000);
 
-    const ranking = publicRanking(rows, req.account.id);
-    const mine = mineIndex >= 0 ? { rank: mineIndex + 1, ...rows[mineIndex] } : null;
-    console.log(`[RANKING WEEKLY] accountId=${req.account.id} rows=${rows.length} mineRank=${mine?.rank || "none"} mineScore=${mine?.score ?? "none"}`);
-
     res.json({
       week: weekKey(),
       weekEnds: dateKey(weekEnd),
-      ranking,
-      mine
+      ranking: publicRanking(rows, req.account.id),
+      mine:
+        mineIndex >= 0
+          ? { rank: mineIndex + 1, ...rows[mineIndex] }
+          : null
     });
   } catch (error) {
     console.error("WEEKLY RANKING ERROR:", error);
