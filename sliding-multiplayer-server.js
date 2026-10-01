@@ -20,6 +20,8 @@
 "use strict";
 
 const express = require("express");
+const http = require("http");
+const { WebSocketServer } = require("ws");
 const crypto = require("crypto");
 const path = require("path");
 
@@ -298,7 +300,6 @@ function setSessionCookie(res, token) {
       "HttpOnly",
       "Secure",
       "SameSite=None",
-      "Partitioned",
       `Max-Age=${maxAge}`,
       "Path=/"
     ].join("; ")
@@ -313,7 +314,6 @@ function clearSessionCookie(res) {
       "HttpOnly",
       "Secure",
       "SameSite=None",
-      "Partitioned",
       "Max-Age=0",
       "Path=/"
     ].join("; ")
@@ -325,10 +325,6 @@ async function requireAuth(req, res, next) {
     const session = getSessionPayload(req);
 
     if (!session) {
-      console.warn("AUTH FAILED: sliding_session cookie missing or invalid", {
-        origin: req.headers.origin || "",
-        hasCookieHeader: Boolean(req.headers.cookie)
-      });
       return res.status(401).json({ error: "로그인이 필요합니다." });
     }
 
@@ -413,20 +409,6 @@ function weekKey(date = new Date()) {
 function nextDayUtc(date) {
   return new Date(date.getTime() + 86400000);
 }
-
-/* =========================================================
-   Request diagnostics (no secrets/cookies logged)
-========================================================= */
-
-app.use((req, res, next) => {
-  if (req.path.startsWith("/api/ranking") || req.path === "/api/login" || req.path === "/api/me") {
-    console.log("API REQUEST", req.method, req.path, {
-      origin: req.headers.origin || "",
-      hasCookieHeader: Boolean(req.headers.cookie)
-    });
-  }
-  next();
-});
 
 /* =========================================================
    Health
@@ -632,9 +614,7 @@ app.post("/api/ranking/score", requireAuth, async (req, res) => {
         Prefer: "return=representation"
       },
       body: {
-        // id는 Supabase 테이블의 기본값/자동 증가 설정을 사용합니다.
-        // UUID/identity 어느 쪽이든 DB 스키마에 맞게 자동 생성되도록
-        // 서버에서 임의의 UUID를 강제로 넣지 않습니다.
+        id: crypto.randomUUID(),
         account_id: req.account.id,
         clears: score.clears,
         max_streak: score.max_streak,
@@ -653,10 +633,7 @@ app.post("/api/ranking/score", requireAuth, async (req, res) => {
     });
   } catch (error) {
     console.error("SCORE SAVE ERROR:", error);
-    res.status(500).json({
-      error: "랭킹 점수를 저장하지 못했습니다.",
-      detail: error?.message || "unknown error"
-    });
+    res.status(500).json({ error: "랭킹 점수를 저장하지 못했습니다." });
   }
 });
 
@@ -898,7 +875,213 @@ app.use((error, req, res, next) => {
   res.status(500).json({ error: "서버 오류가 발생했습니다." });
 });
 
-app.listen(PORT, () => {
+/* =========================================================
+   V29 Multiplayer WebSocket relay
+   The frontend connects to wss://sliding-multiplayer-server-1.onrender.com
+   and sends: matchmake / create / join / matchStart / position / finish / eliminated.
+========================================================= */
+
+const httpServer = http.createServer(app);
+const wss = new WebSocketServer({ server: httpServer });
+
+const quickQueue = [];
+const rooms = new Map();
+const socketState = new Map();
+
+function wsSend(ws, payload) {
+  if (!ws || ws.readyState !== 1) return;
+  try { ws.send(JSON.stringify(payload)); } catch (_) {}
+}
+
+function removeFromQueue(ws) {
+  for (let i = quickQueue.length - 1; i >= 0; i--) {
+    if (quickQueue[i] === ws) quickQueue.splice(i, 1);
+  }
+}
+
+function makeRoomState(room, host, guest, type) {
+  return {
+    room,
+    host,
+    guest,
+    type,
+    round: 0,
+    finishes: new Map(),
+    eliminated: new Map(),
+    lastStart: null
+  };
+}
+
+function peerOf(room, ws) {
+  if (!room) return null;
+  return room.host === ws ? room.guest : room.host;
+}
+
+function roomFor(ws) {
+  const state = socketState.get(ws);
+  return state?.room ? rooms.get(state.room) : null;
+}
+
+function notifyPeerLeft(room, leaving) {
+  const peer = peerOf(room, leaving);
+  if (peer) {
+    wsSend(peer, { type: "peerLeft" });
+    setTimeout(() => {
+      if (peer.readyState === 1) wsSend(peer, { type: "playerLeftTimeout", winner: socketState.get(peer)?.role || "draw" });
+    }, 10000);
+  }
+}
+
+function attachRoom(ws, room, role) {
+  socketState.set(ws, { room: room.room, role });
+  if (role === "host") room.host = ws;
+  else room.guest = ws;
+}
+
+function finishRoom(room) {
+  if (!room) return;
+  rooms.delete(room.room);
+  if (room.host) socketState.delete(room.host);
+  if (room.guest) socketState.delete(room.guest);
+}
+
+function pairQuickMatch(a, b) {
+  const roomCode = `Q${Math.random().toString(36).slice(2, 9).toUpperCase()}`;
+  const room = makeRoomState(roomCode, a, b, "quick");
+  rooms.set(roomCode, room);
+  attachRoom(a, room, "host");
+  attachRoom(b, room, "guest");
+  wsSend(a, { type: "matchFound", role: "host" });
+  wsSend(b, { type: "matchFound", role: "guest" });
+}
+
+wss.on("connection", ws => {
+  socketState.set(ws, { room: null, role: null });
+
+  ws.on("message", raw => {
+    let data;
+    try { data = JSON.parse(raw.toString()); } catch (_) {
+      wsSend(ws, { type: "error", message: "잘못된 WebSocket 메시지입니다." });
+      return;
+    }
+
+    const state = socketState.get(ws) || { room: null, role: null };
+
+    if (data.type === "matchmake") {
+      removeFromQueue(ws);
+      const other = quickQueue.shift();
+      if (other && other.readyState === 1 && other !== ws) pairQuickMatch(other, ws);
+      else {
+        quickQueue.push(ws);
+        socketState.set(ws, { room: null, role: null, queued: true });
+        wsSend(ws, { type: "queued" });
+      }
+      return;
+    }
+
+    if (data.type === "create") {
+      const roomCode = String(data.room || "").trim().toUpperCase();
+      if (!/^[A-Z0-9]{5}$/.test(roomCode)) {
+        wsSend(ws, { type: "error", message: "방 코드가 올바르지 않습니다." });
+        return;
+      }
+      if (rooms.has(roomCode)) {
+        wsSend(ws, { type: "error", message: "이미 사용 중인 방 코드입니다." });
+        return;
+      }
+      const room = makeRoomState(roomCode, ws, null, "friend");
+      rooms.set(roomCode, room);
+      attachRoom(ws, room, "host");
+      wsSend(ws, { type: "roomCreated", room: roomCode });
+      return;
+    }
+
+    if (data.type === "join") {
+      const roomCode = String(data.room || "").trim().toUpperCase();
+      const room = rooms.get(roomCode);
+      if (!room || !room.host) {
+        wsSend(ws, { type: "error", message: "존재하지 않는 방입니다." });
+        return;
+      }
+      if (room.guest && room.guest !== ws) {
+        wsSend(ws, { type: "error", message: "방이 이미 가득 찼습니다." });
+        return;
+      }
+      attachRoom(ws, room, "guest");
+      wsSend(ws, { type: "roomJoined", room: roomCode });
+      wsSend(room.host, { type: "peerJoined" });
+      return;
+    }
+
+    const room = roomFor(ws);
+    if (!room) {
+      wsSend(ws, { type: "error", message: "먼저 빠른 대전이나 방에 참가해주세요." });
+      return;
+    }
+
+    if (data.type === "position") {
+      wsSend(peerOf(room, ws), data);
+      return;
+    }
+
+    if (data.type === "matchStart") {
+      if (state.role !== "host") return;
+      room.round = Number(data.round) || room.round + 1;
+      room.finishes.clear();
+      room.eliminated.clear();
+      room.lastStart = data;
+      wsSend(room.guest, data);
+      return;
+    }
+
+    if (data.type === "finish") {
+      const round = Number(data.round) || room.round;
+      room.finishes.set(state.role, data);
+      const otherRole = state.role === "host" ? "guest" : "host";
+      if (room.finishes.has(otherRole)) {
+        const winner = state.role;
+        const nextStart = data.position || room.finishes.get(otherRole)?.position || { c: 1, r: 1 };
+        const payload = { type: "roundWon", round, winner, nextStart };
+        wsSend(room.host, payload);
+        wsSend(room.guest, payload);
+        room.finishes.clear();
+        room.eliminated.clear();
+      }
+      return;
+    }
+
+    if (data.type === "eliminated") {
+      const round = Number(data.round) || room.round;
+      room.eliminated.set(state.role, data);
+      const otherRole = state.role === "host" ? "guest" : "host";
+      if (Number(data.livesRemaining) <= 0) {
+        if (room.finishes.has(otherRole)) {
+          const payload = { type: "roundWon", round, winner: otherRole, nextStart: room.finishes.get(otherRole)?.position || { c: 1, r: 1 } };
+          wsSend(room.host, payload);
+          wsSend(room.guest, payload);
+          room.finishes.clear(); room.eliminated.clear();
+        } else {
+          wsSend(peerOf(room, ws), { type: "roundWon", round, winner: otherRole, nextStart: data.position || { c: 1, r: 1 } });
+          wsSend(ws, { type: "roundWon", round, winner: otherRole, nextStart: data.position || { c: 1, r: 1 } });
+          room.finishes.clear(); room.eliminated.clear();
+        }
+      }
+      return;
+    }
+  });
+
+  ws.on("close", () => {
+    removeFromQueue(ws);
+    const room = roomFor(ws);
+    if (room) {
+      notifyPeerLeft(room, ws);
+      finishRoom(room);
+    }
+    socketState.delete(ws);
+  });
+});
+
+httpServer.listen(PORT, () => {
   console.log(`Sliding Maze V29 backend running on port ${PORT}`);
   console.log("[ENV CHECK] SUPABASE_URL: FOUND");
   console.log("[ENV CHECK] SUPABASE_SERVICE_ROLE_KEY: FOUND");
@@ -906,4 +1089,5 @@ app.listen(PORT, () => {
   console.log("Daily ranking: ON");
   console.log("Weekly ranking: ON (Monday-Sunday, Asia/Seoul)");
   console.log(`Score: ${SCORE_FORMULA}`);
+  console.log("WebSocket multiplayer: ON");
 });
