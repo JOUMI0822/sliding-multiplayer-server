@@ -1,0 +1,13 @@
+{
+  "name": "sliding-maze-v27-account-ranking",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sliding Maze account and daily ranking server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}
