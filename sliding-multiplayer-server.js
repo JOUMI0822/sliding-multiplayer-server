@@ -1,5 +1,6 @@
 /**
- * Sliding Maze V28 - Account + Daily Ranking + Weekly Ranking
+ * Sliding Maze V29 - Render Backend Only
+ * Account + Daily Ranking + Weekly Ranking
  *
  * V28 score:
  * clears * 50 + maxStreak * 100 - skips * 10 - lifeLosses * 10
@@ -217,7 +218,7 @@ app.get("/api/ranking/weekly/me", requireAuth, (req,res) => {
   res.json({ record:records[0] || null, rank:idx >= 0 ? idx+1 : null });
 });
 
-app.get("/api/health", (req,res) => res.json({ ok:true, version:"V28", dailyRanking:true, weeklyRanking:true, scoreFormula:"clears * 50 + maxStreak * 100 - skips * 10 - lifeLosses * 10" }));
+app.get("/api/health", (req,res) => res.json({ ok:true, version:"V29", dailyRanking:true, weeklyRanking:true, scoreFormula:"clears * 50 + maxStreak * 100 - skips * 10 - lifeLosses * 10" }));
 
 setInterval(() => {
   const cutoff = new Date();
@@ -235,11 +236,12 @@ setInterval(() => {
   for (const [token,s] of sessions) if (!s || s.expiresAt<=now) sessions.delete(token);
 }, 60*60*1000);
 
-app.use(express.static(__dirname));
-app.get("/{*splat}", (req,res) => res.sendFile(path.join(__dirname,"index.html")));
-
+// GitHub Pages가 프론트엔드를 제공하므로 Render는 API만 제공합니다.
+// Express 5의 app.get("*") 와 index.html 정적 제공을 사용하지 않습니다.
 app.listen(PORT, () => {
-  console.log(`Sliding Maze V28 server running on port ${PORT}`);
+  console.log(`Sliding Maze V29 backend running on port ${PORT}`);
+  console.log(`[ENV CHECK] SUPABASE_URL: ${process.env.SUPABASE_URL ? "FOUND" : "MISSING"}`);
+  console.log(`[ENV CHECK] SUPABASE_SERVICE_ROLE_KEY: ${process.env.SUPABASE_SERVICE_ROLE_KEY ? "FOUND" : "MISSING"}`);
   console.log("Daily ranking: ON");
   console.log("Weekly ranking: ON (Monday-Sunday)");
   console.log("Score: clears*50 + maxStreak*100 - skips*10 - lifeLosses*10");
