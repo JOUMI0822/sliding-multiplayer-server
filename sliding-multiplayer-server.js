@@ -124,6 +124,7 @@ function calculateScore(clears, maxStreak, skips, lifeLosses) {
   return Math.max(0, c * 50 + s * 100 - k * 10 - l * 10);
 }
 
+// GitHub Pages(https://joumi0822.github.io)에서 Render API를 호출할 수 있도록 CORS 설정
 app.use((req, res, next) => {
   const origin = req.headers.origin;
 
@@ -255,7 +256,9 @@ setInterval(() => {
 }, 60*60*1000);
 
 app.use(express.static(__dirname));
-app.get("*", (req,res) => res.sendFile(path.join(__dirname,"index.html")));
+app.get("/{*splat}", (req, res) => {
+  res.sendFile(path.join(__dirname, "index.html"));
+});
 
 app.listen(PORT, () => {
   console.log(`Sliding Maze V28 server running on port ${PORT}`);
