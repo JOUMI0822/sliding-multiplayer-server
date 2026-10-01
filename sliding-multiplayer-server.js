@@ -17,6 +17,7 @@ const crypto = require("crypto");
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const SESSION_DAYS = Math.max(1, Number(process.env.SESSION_DAYS || 30));
+const REMEMBER_SESSION_DAYS = Math.max(1, Number(process.env.REMEMBER_SESSION_DAYS || 90));
 const COOKIE_SECURE = String(process.env.COOKIE_SECURE || "").toLowerCase() === "true";
 const ALLOWED_ORIGIN = String(process.env.ALLOWED_ORIGIN || "").trim();
 
@@ -85,8 +86,9 @@ function getSession(req) {
   if (s.expiresAt <= Date.now()) { sessions.delete(token); return null; }
   return { token, ...s };
 }
-function setSessionCookie(res, token) {
-  const p = [`sliding_session=${encodeURIComponent(token)}`, "HttpOnly", "SameSite=None", `Max-Age=${SESSION_DAYS * 86400}`, "Path=/"];
+function setSessionCookie(res, token, remember = false) {
+  const days = remember ? REMEMBER_SESSION_DAYS : SESSION_DAYS;
+  const p = [`sliding_session=${encodeURIComponent(token)}`, "HttpOnly", "SameSite=None", `Max-Age=${days * 86400}`, "Path=/"];
   if (COOKIE_SECURE) p.push("Secure");
   res.setHeader("Set-Cookie", p.join("; "));
 }
@@ -124,10 +126,8 @@ function calculateScore(clears, maxStreak, skips, lifeLosses) {
   return Math.max(0, c * 50 + s * 100 - k * 10 - l * 10);
 }
 
-// GitHub Pages(https://joumi0822.github.io)에서 Render API를 호출할 수 있도록 CORS 설정
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-
   if (ALLOWED_ORIGIN && origin === ALLOWED_ORIGIN) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
@@ -135,11 +135,7 @@ app.use((req, res, next) => {
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   }
-
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(204);
-  }
-
+  if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
 
@@ -158,16 +154,20 @@ app.post("/api/register", (req, res) => {
   db.accounts[id] = { id, nickname, nicknameKey: nk, password: hashPassword(password), createdAt: new Date().toISOString() };
   db.nicknames[nk] = id;
   saveData();
-  setSessionCookie(res, createSession(id));
+  setSessionCookie(res, createSession(id), false);
   res.json({ user: { id, nickname } });
 });
 
 app.post("/api/login", (req, res) => {
   const id = normalizeId(req.body.id);
   const account = db.accounts[id];
-  if (!account || !verifyPassword(String(req.body.password || ""), account.password)) return res.status(401).json({ error: "아이디 또는 비밀번호가 올바르지 않습니다." });
-  setSessionCookie(res, createSession(id));
-  res.json({ user: { id: account.id, nickname: account.nickname } });
+  if (!account || !verifyPassword(String(req.body.password || ""), account.password)) {
+    return res.status(401).json({ error: "아이디 또는 비밀번호가 올바르지 않습니다." });
+  }
+
+  const remember = req.body.remember === true;
+  setSessionCookie(res, createSession(id), remember);
+  res.json({ user: { id: account.id, nickname: account.nickname }, remember });
 });
 
 app.get("/api/me", requireAuth, (req, res) => res.json({ id: req.account.id, nickname: req.account.nickname }));
