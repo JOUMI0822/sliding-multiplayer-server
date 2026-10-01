@@ -1,13 +1,14 @@
 {
-  "name": "sliding-maze-v27-account-ranking",
+  "name": "sliding-maze-v29-supabase",
   "version": "1.0.0",
   "private": true,
-  "description": "Sliding Maze account and daily ranking server",
-  "main": "server.js",
+  "description": "Sliding Maze V29 Supabase account, ranking and multiplayer server",
+  "main": "sliding-multiplayer-server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node sliding-multiplayer-server.js"
   },
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "ws": "^8.18.0"
   }
 }
