@@ -1,5 +1,5 @@
 /**
- * Sliding Maze V29 - Render Backend Only
+ * Sliding Maze V29 - Render Backend + GitHub Pages
  * Account + Daily Ranking + Weekly Ranking
  *
  * V28 score:
@@ -19,6 +19,9 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const SESSION_DAYS = Math.max(1, Number(process.env.SESSION_DAYS || 30));
 const COOKIE_SECURE = String(process.env.COOKIE_SECURE || "").toLowerCase() === "true";
+const SUPABASE_URL = String(process.env.SUPABASE_URL || "").trim();
+const SUPABASE_SERVICE_ROLE_KEY = String(process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+const ALLOWED_ORIGIN = String(process.env.ALLOWED_ORIGIN || "").trim().replace(/\/$/, "");
 
 const DATA_DIR = path.join(__dirname, "data");
 const DATA_FILE = path.join(DATA_DIR, "accounts.json");
@@ -86,12 +89,12 @@ function getSession(req) {
   return { token, ...s };
 }
 function setSessionCookie(res, token) {
-  const p = [`sliding_session=${encodeURIComponent(token)}`, "HttpOnly", "SameSite=Lax", `Max-Age=${SESSION_DAYS * 86400}`, "Path=/"];
+  const p = [`sliding_session=${encodeURIComponent(token)}`, "HttpOnly", COOKIE_SECURE ? "SameSite=None" : "SameSite=Lax", `Max-Age=${SESSION_DAYS * 86400}`, "Path=/"];
   if (COOKIE_SECURE) p.push("Secure");
   res.setHeader("Set-Cookie", p.join("; "));
 }
 function clearSessionCookie(res) {
-  const p = ["sliding_session=", "HttpOnly", "SameSite=Lax", "Max-Age=0", "Path=/"];
+  const p = ["sliding_session=", "HttpOnly", COOKIE_SECURE ? "SameSite=None" : "SameSite=Lax", "Max-Age=0", "Path=/"];
   if (COOKIE_SECURE) p.push("Secure");
   res.setHeader("Set-Cookie", p.join("; "));
 }
@@ -125,6 +128,19 @@ function calculateScore(clears, maxStreak, skips, lifeLosses) {
 }
 
 app.use(express.json({ limit: "16kb" }));
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && (!ALLOWED_ORIGIN || origin === ALLOWED_ORIGIN)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  }
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
+
 
 app.post("/api/register", (req, res) => {
   const id = normalizeId(req.body.id);
@@ -218,7 +234,16 @@ app.get("/api/ranking/weekly/me", requireAuth, (req,res) => {
   res.json({ record:records[0] || null, rank:idx >= 0 ? idx+1 : null });
 });
 
-app.get("/api/health", (req,res) => res.json({ ok:true, version:"V29", dailyRanking:true, weeklyRanking:true, scoreFormula:"clears * 50 + maxStreak * 100 - skips * 10 - lifeLosses * 10" }));
+app.get("/api/health", (req,res) => res.json({
+  ok: true,
+  version: "V29",
+  dailyRanking: true,
+  weeklyRanking: true,
+  scoreFormula: "clears * 50 + maxStreak * 100 - skips * 10 - lifeLosses * 10",
+  supabaseUrl: SUPABASE_URL ? "FOUND" : "MISSING",
+  supabaseServiceRoleKey: SUPABASE_SERVICE_ROLE_KEY ? "FOUND" : "MISSING",
+  allowedOrigin: ALLOWED_ORIGIN || "MISSING"
+}));
 
 setInterval(() => {
   const cutoff = new Date();
@@ -236,12 +261,14 @@ setInterval(() => {
   for (const [token,s] of sessions) if (!s || s.expiresAt<=now) sessions.delete(token);
 }, 60*60*1000);
 
-// GitHub Pages가 프론트엔드를 제공하므로 Render는 API만 제공합니다.
-// Express 5의 app.get("*") 와 index.html 정적 제공을 사용하지 않습니다.
+// Render는 백엔드 전용입니다. 게임 index.html은 GitHub Pages가 제공합니다.
+// Express 5의 catch-all * 라우트와 정적 index.html 제공을 사용하지 않습니다.
+
 app.listen(PORT, () => {
   console.log(`Sliding Maze V29 backend running on port ${PORT}`);
-  console.log(`[ENV CHECK] SUPABASE_URL: ${process.env.SUPABASE_URL ? "FOUND" : "MISSING"}`);
-  console.log(`[ENV CHECK] SUPABASE_SERVICE_ROLE_KEY: ${process.env.SUPABASE_SERVICE_ROLE_KEY ? "FOUND" : "MISSING"}`);
+  console.log(`[ENV CHECK] SUPABASE_URL: ${SUPABASE_URL ? "FOUND" : "MISSING"}`);
+  console.log(`[ENV CHECK] SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY ? "FOUND" : "MISSING"}`);
+  console.log(`[ENV CHECK] ALLOWED_ORIGIN: ${ALLOWED_ORIGIN || "MISSING"}`);
   console.log("Daily ranking: ON");
   console.log("Weekly ranking: ON (Monday-Sunday)");
   console.log("Score: clears*50 + maxStreak*100 - skips*10 - lifeLosses*10");
