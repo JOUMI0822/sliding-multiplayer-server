@@ -226,14 +226,14 @@ async function supabaseRequest(table, options = {}) {
 
 async function selectOneAccountById(id) {
   const rows = await supabaseRequest("accounts", {
-    query: `?select=id,nickname,password_hash,level,exp,created_at&id=eq.${escapeSupabaseValue(id)}&limit=1`
+    query: `?select=id,nickname,password_hash,created_at&id=eq.${escapeSupabaseValue(id)}&limit=1`
   });
   return Array.isArray(rows) && rows.length ? rows[0] : null;
 }
 
 async function selectAccountByNickname(nickname) {
   const rows = await supabaseRequest("accounts", {
-    query: `?select=id,nickname,password_hash,level,exp,created_at&nickname=ilike.${escapeSupabaseValue(nickname)}&limit=1`
+    query: `?select=id,nickname,password_hash,created_at&nickname=ilike.${escapeSupabaseValue(nickname)}&limit=1`
   });
   return Array.isArray(rows) && rows.length ? rows[0] : null;
 }
@@ -503,16 +503,14 @@ app.post("/api/register", async (req, res) => {
 
     const rows = await supabaseRequest("accounts", {
       method: "POST",
-      query: "?select=id,nickname,level,exp,created_at",
+      query: "?select=id,nickname,created_at",
       headers: {
         Prefer: "return=representation"
       },
       body: {
         id,
         nickname,
-        password_hash: passwordHash,
-        level: 1,
-        exp: 0
+        password_hash: passwordHash
       }
     });
 
@@ -529,9 +527,7 @@ app.post("/api/register", async (req, res) => {
       ok: true,
       user: {
         id: account.id,
-        nickname: account.nickname,
-        level: Number(account.level) || 1,
-        exp: Number(account.exp) || 0
+        nickname: account.nickname
       }
     });
   } catch (error) {
@@ -595,9 +591,7 @@ app.post("/api/login", async (req, res) => {
       ok: true,
       user: {
         id: account.id,
-        nickname: account.nickname,
-        level: Number(account.level) || 1,
-        exp: Number(account.exp) || 0
+        nickname: account.nickname
       }
     });
   } catch (error) {
@@ -617,47 +611,8 @@ app.post("/api/login", async (req, res) => {
 app.get("/api/me", requireAuth, (req, res) => {
   res.json({
     id: req.account.id,
-    nickname: req.account.nickname,
-    level: Number(req.account.level) || 1,
-    exp: Number(req.account.exp) || 0
+    nickname: req.account.nickname
   });
-});
-
-/* =========================================================
-   Level / EXP progress
-========================================================= */
-function getLevelRequiredExp(level) {
-  const lv = Math.max(1, Math.floor(Number(level) || 1));
-  return 100 + (lv - 1) * 50;
-}
-function normalizeProgress(level, exp) {
-  let lv = Math.max(1, Math.floor(Number(level) || 1));
-  let xp = Math.max(0, Math.floor(Number(exp) || 0));
-  while (xp >= getLevelRequiredExp(lv)) { xp -= getLevelRequiredExp(lv); lv++; }
-  return { level: lv, exp: xp };
-}
-function calculateExperience(body) {
-  const clears=Math.max(0,Math.floor(Number(body?.clears)||0));
-  const streak=Math.max(0,Math.floor(Number(body?.maxStreak)||0));
-  if (body?.mode === "solo") return clears*10+streak*25;
-  if (body?.result === "draw") return 0;
-  if (body?.result === body?.role) return clears*20+streak*30+Math.max(0,Math.floor(Number(body?.livesRemaining)||0))*5;
-  if (body?.mode === "multiplayer") return clears*10+streak*25;
-  return Math.max(0,Math.floor(Number(body?.amount)||0));
-}
-app.get("/api/progress", requireAuth, async (req,res)=>{
-  try { res.json(normalizeProgress(req.account.level,req.account.exp)); }
-  catch(error){ console.error("PROGRESS GET ERROR:",error); res.status(500).json({error:"레벨 정보를 불러오지 못했습니다."}); }
-});
-app.post("/api/progress/award", requireAuth, async (req,res)=>{
-  try {
-    const amount=Math.max(0,Math.min(100000,Math.floor(calculateExperience(req.body))));
-    const current=normalizeProgress(req.account.level,req.account.exp);
-    const next=normalizeProgress(current.level,current.exp+amount);
-    const rows=await supabaseRequest("accounts",{method:"PATCH",query:`?id=eq.${escapeSupabaseValue(req.account.id)}&select=id,nickname,level,exp`,headers:{Prefer:"return=representation"},body:{level:next.level,exp:next.exp}});
-    const account=Array.isArray(rows)?rows[0]:rows;
-    res.json({saved:true,awarded:amount,level:Number(account?.level)||next.level,exp:Number(account?.exp)||next.exp,requiredExp:getLevelRequiredExp(Number(account?.level)||next.level)});
-  } catch(error){ console.error("PROGRESS AWARD ERROR:",error); res.status(500).json({error:"EXP를 저장하지 못했습니다."}); }
 });
 
 /* =========================================================
@@ -781,6 +736,7 @@ function aggregateBestScores(scores, accountsById) {
     const row = {
       accountId,
       nickname: account.nickname,
+      level: Math.max(1, Number(account.level) || 1),
       score: Number(score.score) || 0,
       clears: Number(score.clears) || 0,
       maxStreak: Number(score.max_streak) || 0,
@@ -819,7 +775,7 @@ async function getAccountsForScoreRows(scores) {
       .join(",");
 
     const rows = await supabaseRequest("accounts", {
-      query: `?select=id,nickname&id=in.(${encodeURIComponent(filter)})`
+      query: `?select=id,nickname,level&id=in.(${encodeURIComponent(filter)})`
     });
 
     for (const account of Array.isArray(rows) ? rows : []) {
@@ -852,6 +808,7 @@ function publicRanking(rows, accountId) {
   return rows.slice(0, 100).map((row, index) => ({
     rank: index + 1,
     nickname: row.nickname,
+    level: row.level,
     score: row.score,
     clears: row.clears,
     maxStreak: row.maxStreak,
