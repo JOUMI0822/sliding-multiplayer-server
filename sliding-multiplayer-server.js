@@ -54,7 +54,7 @@ const SUPABASE_REST = `${SUPABASE_URL}/rest/v1`;
 app.disable("x-powered-by");
 app.use(express.json({ limit: "16kb" }));
 
-// 랭킹/진행도 API는 브라우저나 CDN에 오래 캐시되면 안 됩니다.
+/* RANKING_NO_CACHE: ranking/progress must always be fresh. */
 app.use((req, res, next) => {
   if (req.path.startsWith("/api/ranking") || req.path.startsWith("/api/progress")) {
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0");
@@ -821,15 +821,19 @@ app.post("/api/ranking/score", requireAuth, async (req, res) => {
     });
 
     const saved = Array.isArray(rows) ? rows[0] : rows;
+    console.log(`[SCORE SAVE ${req.requestId || "unknown"}] account=${req.account.id} clears=${score.clears} streak=${score.max_streak} score=${score.score}`);
 
+    res.setHeader("Cache-Control", "no-store");
     res.json({
       saved: true,
       score: score.score,
       record: saved || score
     });
   } catch (error) {
-    console.error("SCORE SAVE ERROR:", error);
-    res.status(500).json({ error: "랭킹 점수를 저장하지 못했습니다." });
+    console.error("SCORE SAVE ERROR:", error?.message || error);
+    if (error?.status) console.error("SCORE SAVE STATUS:", error.status);
+    if (error?.supabase) console.error("SCORE SAVE SUPABASE:", JSON.stringify(error.supabase));
+    res.status(500).json({ error: "랭킹 점수를 저장하지 못했습니다.", debugId: req.requestId || null });
   }
 });
 
@@ -1254,13 +1258,14 @@ wss.on("connection", ws => {
       const otherRole = state.role === "host" ? "guest" : "host";
       if (Number(data.livesRemaining) <= 0) {
         if (room.finishes.has(otherRole)) {
-          const payload = { type: "roundWon", round, winner: otherRole, nextStart: room.finishes.get(otherRole)?.position || { c: 1, r: 1 } };
+          const payload = { type: "matchOver", round, winner: otherRole };
           wsSend(room.host, payload);
           wsSend(room.guest, payload);
           room.finishes.clear(); room.eliminated.clear();
         } else {
-          wsSend(peerOf(room, ws), { type: "roundWon", round, winner: otherRole, nextStart: data.position || { c: 1, r: 1 } });
-          wsSend(ws, { type: "roundWon", round, winner: otherRole, nextStart: data.position || { c: 1, r: 1 } });
+          const payload = { type: "matchOver", round, winner: otherRole };
+          wsSend(room.host, payload);
+          wsSend(room.guest, payload);
           room.finishes.clear(); room.eliminated.clear();
         }
       }
