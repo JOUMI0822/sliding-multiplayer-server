@@ -608,11 +608,136 @@ app.post("/api/login", async (req, res) => {
    Current session
 ========================================================= */
 
-app.get("/api/me", requireAuth, (req, res) => {
-  res.json({
-    id: req.account.id,
-    nickname: req.account.nickname
+app.get("/api/me", requireAuth, async (req, res) => {
+  try {
+    const progress = await selectAccountProgress(req.account.id);
+
+    res.json({
+      id: req.account.id,
+      nickname: req.account.nickname,
+      level: progress?.level ?? 1,
+      exp: progress?.exp ?? 0
+    });
+  } catch (error) {
+    console.error("[ME] progress lookup failed", error);
+    res.json({
+      id: req.account.id,
+      nickname: req.account.nickname,
+      level: 1,
+      exp: 0
+    });
+  }
+});
+
+/* =========================================================
+   Level / EXP
+   - level 1 requires 100 EXP
+   - each next level requires +50 EXP
+========================================================= */
+
+function getLevelRequiredExp(level) {
+  const lv = Math.max(1, Math.floor(Number(level) || 1));
+  return 100 + (lv - 1) * 50;
+}
+
+function normalizeAccountProgress(level, exp) {
+  let lv = Math.max(1, Math.floor(Number(level) || 1));
+  let xp = Math.max(0, Math.floor(Number(exp) || 0));
+
+  while (xp >= getLevelRequiredExp(lv)) {
+    xp -= getLevelRequiredExp(lv);
+    lv++;
+  }
+
+  return { level: lv, exp: xp };
+}
+
+async function selectAccountProgress(accountId) {
+  const rows = await supabaseRequest("accounts", {
+    query: `?select=id,level,exp&id=eq.${escapeSupabaseValue(accountId)}&limit=1`
   });
+
+  if (!Array.isArray(rows) || !rows.length) return null;
+
+  return normalizeAccountProgress(rows[0].level, rows[0].exp);
+}
+
+app.get("/api/progress", requireAuth, async (req, res) => {
+  try {
+    const progress = await selectAccountProgress(req.account.id);
+
+    if (!progress) {
+      return res.status(404).json({ error: "계정을 찾을 수 없습니다." });
+    }
+
+    res.json(progress);
+  } catch (error) {
+    console.error("[EXP] GET progress failed", error);
+    res.status(500).json({ error: "EXP 정보를 불러오지 못했습니다." });
+  }
+});
+
+app.post("/api/progress/award", requireAuth, async (req, res) => {
+  try {
+    const rawAmount = Number(req.body?.amount);
+
+    if (!Number.isFinite(rawAmount) || rawAmount <= 0) {
+      return res.status(400).json({ error: "잘못된 EXP 값입니다." });
+    }
+
+    // 한 번의 결과 화면에서 비정상적으로 큰 값이 들어오는 것을 방지.
+    const amount = Math.min(10000, Math.floor(rawAmount));
+
+    const current = await selectAccountProgress(req.account.id);
+
+    if (!current) {
+      return res.status(404).json({ error: "계정을 찾을 수 없습니다." });
+    }
+
+    let level = current.level;
+    let exp = current.exp;
+    let remaining = amount;
+
+    while (remaining > 0) {
+      const required = getLevelRequiredExp(level);
+      const add = Math.min(remaining, required - exp);
+
+      exp += add;
+      remaining -= add;
+
+      if (exp >= required) {
+        level++;
+        exp = 0;
+      }
+    }
+
+    const progress = normalizeAccountProgress(level, exp);
+
+    await supabaseRequest("accounts", {
+      method: "PATCH",
+      query: `?id=eq.${escapeSupabaseValue(req.account.id)}`,
+      headers: {
+        Prefer: "return=minimal"
+      },
+      body: {
+        level: progress.level,
+        exp: progress.exp
+      }
+    });
+
+    res.json({
+      awarded: amount,
+      level: progress.level,
+      exp: progress.exp,
+      saved: true
+    });
+  } catch (error) {
+    console.error("[EXP] POST award failed", error);
+    if (error?.supabase) {
+      console.error("[EXP] SUPABASE_ERROR", JSON.stringify(error.supabase));
+    }
+    res.status(500).json({ error: "EXP 저장에 실패했습니다." });
+  }
 });
 
 /* =========================================================
@@ -774,7 +899,7 @@ async function getAccountsForScoreRows(scores) {
       .join(",");
 
     const rows = await supabaseRequest("accounts", {
-      query: `?select=id,nickname,level&id=in.(${encodeURIComponent(filter)})`
+      query: `?select=id,nickname&id=in.(${encodeURIComponent(filter)})`
     });
 
     for (const account of Array.isArray(rows) ? rows : []) {
@@ -806,7 +931,6 @@ async function buildRanking(scope) {
 function publicRanking(rows, accountId) {
   return rows.slice(0, 100).map((row, index) => ({
     rank: index + 1,
-    level: Number(row.level) || 1,
     nickname: row.nickname,
     score: row.score,
     clears: row.clears,
