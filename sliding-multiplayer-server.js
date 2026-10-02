@@ -818,8 +818,10 @@ app.post("/api/ranking/score", requireAuth, async (req, res) => {
       record: saved || score
     });
   } catch (error) {
-    console.error("SCORE SAVE ERROR:", error);
-    res.status(500).json({ error: "랭킹 점수를 저장하지 못했습니다." });
+    console.error("SCORE SAVE ERROR:", error?.message || error);
+    if (error?.status) console.error("SCORE SAVE STATUS:", error.status);
+    if (error?.supabase) console.error("SCORE SAVE SUPABASE:", JSON.stringify(error.supabase));
+    res.status(500).json({ error: "랭킹 점수를 저장하지 못했습니다.", debugId: req.requestId || null });
   }
 });
 
