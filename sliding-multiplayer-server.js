@@ -54,16 +54,6 @@ const SUPABASE_REST = `${SUPABASE_URL}/rest/v1`;
 app.disable("x-powered-by");
 app.use(express.json({ limit: "16kb" }));
 
-/* RANKING_NO_CACHE: ranking/progress must always be fresh. */
-app.use((req, res, next) => {
-  if (req.path.startsWith("/api/ranking") || req.path.startsWith("/api/progress")) {
-    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0");
-    res.setHeader("Pragma", "no-cache");
-    res.setHeader("Expires", "0");
-  }
-  next();
-});
-
 /* =========================================================
    Request / CORS diagnostics
    - Logs request method/path/origin without passwords or tokens.
@@ -821,19 +811,15 @@ app.post("/api/ranking/score", requireAuth, async (req, res) => {
     });
 
     const saved = Array.isArray(rows) ? rows[0] : rows;
-    console.log(`[SCORE SAVE ${req.requestId || "unknown"}] account=${req.account.id} clears=${score.clears} streak=${score.max_streak} score=${score.score}`);
 
-    res.setHeader("Cache-Control", "no-store");
     res.json({
       saved: true,
       score: score.score,
       record: saved || score
     });
   } catch (error) {
-    console.error("SCORE SAVE ERROR:", error?.message || error);
-    if (error?.status) console.error("SCORE SAVE STATUS:", error.status);
-    if (error?.supabase) console.error("SCORE SAVE SUPABASE:", JSON.stringify(error.supabase));
-    res.status(500).json({ error: "랭킹 점수를 저장하지 못했습니다.", debugId: req.requestId || null });
+    console.error("SCORE SAVE ERROR:", error);
+    res.status(500).json({ error: "랭킹 점수를 저장하지 못했습니다." });
   }
 });
 
@@ -875,7 +861,6 @@ function aggregateBestScores(scores, accountsById) {
     const row = {
       accountId,
       nickname: account.nickname,
-      level: Math.max(1, Number(account.level) || 1),
       score: Number(score.score) || 0,
       clears: Number(score.clears) || 0,
       maxStreak: Number(score.max_streak) || 0,
@@ -914,7 +899,7 @@ async function getAccountsForScoreRows(scores) {
       .join(",");
 
     const rows = await supabaseRequest("accounts", {
-      query: `?select=id,nickname,level&id=in.(${encodeURIComponent(filter)})`
+      query: `?select=id,nickname&id=in.(${encodeURIComponent(filter)})`
     });
 
     for (const account of Array.isArray(rows) ? rows : []) {
@@ -946,7 +931,6 @@ async function buildRanking(scope) {
 function publicRanking(rows, accountId) {
   return rows.slice(0, 100).map((row, index) => ({
     rank: index + 1,
-    level: Math.max(1, Number(row.level) || 1),
     nickname: row.nickname,
     score: row.score,
     clears: row.clears,
@@ -1258,14 +1242,13 @@ wss.on("connection", ws => {
       const otherRole = state.role === "host" ? "guest" : "host";
       if (Number(data.livesRemaining) <= 0) {
         if (room.finishes.has(otherRole)) {
-          const payload = { type: "matchOver", round, winner: otherRole };
+          const payload = { type: "roundWon", round, winner: otherRole, nextStart: room.finishes.get(otherRole)?.position || { c: 1, r: 1 } };
           wsSend(room.host, payload);
           wsSend(room.guest, payload);
           room.finishes.clear(); room.eliminated.clear();
         } else {
-          const payload = { type: "matchOver", round, winner: otherRole };
-          wsSend(room.host, payload);
-          wsSend(room.guest, payload);
+          wsSend(peerOf(room, ws), { type: "roundWon", round, winner: otherRole, nextStart: data.position || { c: 1, r: 1 } });
+          wsSend(ws, { type: "roundWon", round, winner: otherRole, nextStart: data.position || { c: 1, r: 1 } });
           room.finishes.clear(); room.eliminated.clear();
         }
       }
