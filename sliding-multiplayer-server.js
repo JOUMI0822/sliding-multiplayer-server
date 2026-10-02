@@ -736,7 +736,6 @@ function aggregateBestScores(scores, accountsById) {
     const row = {
       accountId,
       nickname: account.nickname,
-      level: Math.max(1, Number(account.level) || 1),
       score: Number(score.score) || 0,
       clears: Number(score.clears) || 0,
       maxStreak: Number(score.max_streak) || 0,
@@ -807,8 +806,8 @@ async function buildRanking(scope) {
 function publicRanking(rows, accountId) {
   return rows.slice(0, 100).map((row, index) => ({
     rank: index + 1,
+    level: Number(row.level) || 1,
     nickname: row.nickname,
-    level: row.level,
     score: row.score,
     clears: row.clears,
     maxStreak: row.maxStreak,
