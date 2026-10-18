@@ -800,6 +800,7 @@ app.post("/api/ranking/score", requireAuth, async (req, res) => {
         Prefer: "return=representation"
       },
       body: {
+        id: crypto.randomUUID(),
         account_id: req.account.id,
         clears: score.clears,
         max_streak: score.max_streak,
@@ -1223,35 +1224,44 @@ wss.on("connection", ws => {
 
     if (data.type === "finish") {
       const round = Number(data.round) || room.round;
+      // 먼저 도착한 플레이어가 있으면 즉시 라운드를 끝내고 다음 맵으로 이동합니다.
+      if (room.roundResolved === round) return;
+      room.roundResolved = round;
       room.finishes.set(state.role, data);
       const otherRole = state.role === "host" ? "guest" : "host";
-      if (room.finishes.has(otherRole)) {
-        const winner = state.role;
-        const nextStart = data.position || room.finishes.get(otherRole)?.position || { c: 1, r: 1 };
-        const payload = { type: "roundWon", round, winner, nextStart };
-        wsSend(room.host, payload);
-        wsSend(room.guest, payload);
-        room.finishes.clear();
-        room.eliminated.clear();
-      }
+      const payload = { type: "roundWon", round, winner: state.role, nextStart: data.position || { c: 1, r: 1 } };
+      wsSend(room.host, payload);
+      wsSend(room.guest, payload);
+      room.finishes.clear();
+      room.eliminated.clear();
       return;
     }
 
     if (data.type === "eliminated") {
       const round = Number(data.round) || room.round;
+      if (room.roundResolved === round) return;
       room.eliminated.set(state.role, data);
       const otherRole = state.role === "host" ? "guest" : "host";
+
+      // 목숨을 모두 잃은 순간 경기를 종료합니다. 탈락한 쪽은 패배, 상대는 승리입니다.
       if (Number(data.livesRemaining) <= 0) {
-        if (room.finishes.has(otherRole)) {
-          const payload = { type: "roundWon", round, winner: otherRole, nextStart: room.finishes.get(otherRole)?.position || { c: 1, r: 1 } };
-          wsSend(room.host, payload);
-          wsSend(room.guest, payload);
-          room.finishes.clear(); room.eliminated.clear();
-        } else {
-          wsSend(peerOf(room, ws), { type: "roundWon", round, winner: otherRole, nextStart: data.position || { c: 1, r: 1 } });
-          wsSend(ws, { type: "roundWon", round, winner: otherRole, nextStart: data.position || { c: 1, r: 1 } });
-          room.finishes.clear(); room.eliminated.clear();
-        }
+        room.roundResolved = round;
+        const payload = { type: "matchOver", winner: otherRole, loser: state.role };
+        wsSend(room.host, payload);
+        wsSend(room.guest, payload);
+        room.finishes.clear();
+        room.eliminated.clear();
+        return;
+      }
+
+      // 둘 다 해당 맵에서 실패하면 무승부 라운드로 다음 맵으로 넘어갑니다.
+      if (room.eliminated.has(otherRole)) {
+        room.roundResolved = round;
+        const payload = { type: "roundWon", round, winner: "draw", nextStart: data.position || { c: 1, r: 1 } };
+        wsSend(room.host, payload);
+        wsSend(room.guest, payload);
+        room.finishes.clear();
+        room.eliminated.clear();
       }
       return;
     }
