@@ -1076,6 +1076,28 @@ const wss = new WebSocketServer({ server: httpServer });
 const quickQueue = [];
 const rooms = new Map();
 const socketState = new Map();
+let nextWsDebugId = 1;
+
+// 빠른 대전 문제를 재현할 때 흐름을 확인하기 위한 진단 로그입니다.
+// 토큰/메시지 본문/플레이어 개인정보는 기록하지 않습니다.
+function quickDebug(ws, event, extra = {}) {
+  const state = socketState.get(ws) || { room: null, role: null };
+  const room = state.room ? rooms.get(state.room) : null;
+  console.log("[QUICK DEBUG]", JSON.stringify({
+    time: new Date().toISOString(),
+    event,
+    ws: ws?._quickDebugId || null,
+    room: state.room || null,
+    role: state.role || null,
+    queued: Boolean(state.queued),
+    queueLength: quickQueue.length,
+    roomType: room?.type || null,
+    hostReady: room?.quickHostReady ?? null,
+    guestReady: room?.quickGuestReady ?? null,
+    startRequested: room?.quickStartRequested ?? null,
+    ...extra
+  }));
+}
 
 function wsSend(ws, payload) {
   if (!ws || ws.readyState !== 1) return;
@@ -1152,12 +1174,14 @@ function pairQuickMatch(a, b) {
   rooms.set(roomCode, room);
   attachRoom(a, room, "host");
   attachRoom(b, room, "guest");
+  console.log("[QUICK DEBUG]", JSON.stringify({ time: new Date().toISOString(), event: "pairQuickMatch", room: roomCode, hostWs: a?._quickDebugId || null, guestWs: b?._quickDebugId || null, queueLength: quickQueue.length }));
   wsSend(a, { type: "matchFound", role: "host" });
   wsSend(b, { type: "matchFound", role: "guest" });
   // 한쪽 클라이언트가 매칭 알림을 받지 못하거나 준비 응답이 끊기면
   // 빈 방을 무기한 유지하지 않고 두 플레이어 모두 다시 매칭할 수 있게 합니다.
   room.quickReadyTimer = setTimeout(() => {
     if (room.quickGuestReady && room.quickHostReady) return;
+    console.warn(`[QUICK DEBUG] ${new Date().toISOString()} event=quickMatchTimeout room=${roomCode} hostReady=${room.quickHostReady} guestReady=${room.quickGuestReady}`);
     console.warn(`[QUICK MATCH TIMEOUT] room=${roomCode} hostReady=${room.quickHostReady} guestReady=${room.quickGuestReady}`);
     const timeoutMessage = {
       type: "quickMatchTimeout",
@@ -1170,7 +1194,12 @@ function pairQuickMatch(a, b) {
 }
 
 wss.on("connection", ws => {
+  ws._quickDebugId = nextWsDebugId++;
   socketState.set(ws, { room: null, role: null });
+  quickDebug(ws, "wsConnected");
+  ws.on("error", error => {
+    quickDebug(ws, "wsError", { message: String(error?.message || error) });
+  });
 
   ws.on("message", raw => {
     let data;
@@ -1180,14 +1209,20 @@ wss.on("connection", ws => {
     }
 
     const state = socketState.get(ws) || { room: null, role: null };
+    if (["matchmake", "matchReady", "matchStart", "create", "join"].includes(data.type)) {
+      quickDebug(ws, "received:" + data.type, data.type === "matchStart" ? { round: data.round } : {});
+    }
 
     if (data.type === "matchmake") {
       removeFromQueue(ws);
       const other = quickQueue.shift();
-      if (other && other.readyState === 1 && other !== ws) pairQuickMatch(other, ws);
-      else {
+      if (other && other.readyState === 1 && other !== ws) {
+        quickDebug(ws, "matchmakePaired", { otherWs: other?._quickDebugId || null });
+        pairQuickMatch(other, ws);
+      } else {
         quickQueue.push(ws);
         socketState.set(ws, { room: null, role: null, queued: true });
+        quickDebug(ws, "queued");
         wsSend(ws, { type: "queued" });
       }
       return;
@@ -1241,6 +1276,7 @@ wss.on("connection", ws => {
       // quickMatchReady가 방장의 matchFound보다 먼저 도착할 수 있습니다.
       if (state.role === "guest") room.quickGuestReady = true;
       if (state.role === "host") room.quickHostReady = true;
+      quickDebug(ws, "matchReadyUpdated");
 
       if (room.quickGuestReady && room.quickHostReady) {
         if (room.quickReadyTimer) clearTimeout(room.quickReadyTimer);
@@ -1250,9 +1286,11 @@ wss.on("connection", ws => {
         // 이 경우 방장에게 quickMatchReady를 다시 보내 startMultiplayerMatch()를
         // 두 번 실행시키지 않고, 대기 중인 matchStart만 게스트에게 전달합니다.
         if (room.quickStartRequested && room.lastStart) {
+          console.log("[QUICK DEBUG]", JSON.stringify({ time: new Date().toISOString(), event: "forwardBufferedMatchStartToGuest", room: room.room, guestWs: room.guest?._quickDebugId || null, round: room.lastStart?.round }));
           wsSend(room.guest, room.lastStart);
           room.quickStartRequested = false;
         } else {
+          console.log("[QUICK DEBUG]", JSON.stringify({ time: new Date().toISOString(), event: "sendQuickMatchReadyToHost", room: room.room, hostWs: room.host?._quickDebugId || null }));
           wsSend(room.host, { type: "quickMatchReady" });
         }
       }
@@ -1271,6 +1309,7 @@ wss.on("connection", ws => {
       if (room.type === "quick" && !(room.quickGuestReady && room.quickHostReady)) {
         room.quickStartRequested = true;
         room.lastStart = data;
+        quickDebug(ws, "bufferMatchStartUntilBothReady", { round: data.round });
         return;
       }
       if (room.finishResolveTimer) clearTimeout(room.finishResolveTimer);
@@ -1281,6 +1320,7 @@ wss.on("connection", ws => {
       room.finishes.clear();
       room.eliminated.clear();
       room.lastStart = data;
+      quickDebug(ws, "forwardMatchStartToGuest", { round: data.round, guestWs: room.guest?._quickDebugId || null });
       wsSend(room.guest, data);
       return;
     }
@@ -1356,7 +1396,8 @@ wss.on("connection", ws => {
     }
   });
 
-  ws.on("close", () => {
+  ws.on("close", (code, reason) => {
+    quickDebug(ws, "wsClosed", { closeCode: code, closeReason: String(reason || "") });
     removeFromQueue(ws);
     const room = roomFor(ws);
     if (room) {
