@@ -1158,10 +1158,15 @@ function pairQuickMatch(a, b) {
   // 빈 방을 무기한 유지하지 않고 두 플레이어 모두 다시 매칭할 수 있게 합니다.
   room.quickReadyTimer = setTimeout(() => {
     if (room.quickGuestReady && room.quickHostReady) return;
-    wsSend(room.host, { type: "quickMatchTimeout", message: "상대 연결이 완료되지 않았습니다. 다시 빠른 대전을 시도해 주세요." });
-    wsSend(room.guest, { type: "quickMatchTimeout", message: "상대 연결이 완료되지 않았습니다. 다시 빠른 대전을 시도해 주세요." });
+    console.warn(`[QUICK MATCH TIMEOUT] room=${roomCode} hostReady=${room.quickHostReady} guestReady=${room.quickGuestReady}`);
+    const timeoutMessage = {
+      type: "quickMatchTimeout",
+      message: "상대 연결 준비가 시간 초과되었습니다. 빠른 대전을 다시 시도해 주세요."
+    };
+    wsSend(room.host, timeoutMessage);
+    wsSend(room.guest, timeoutMessage);
     finishRoom(room);
-  }, 12000);
+  }, 25000);
 }
 
 wss.on("connection", ws => {
@@ -1240,10 +1245,15 @@ wss.on("connection", ws => {
       if (room.quickGuestReady && room.quickHostReady) {
         if (room.quickReadyTimer) clearTimeout(room.quickReadyTimer);
         room.quickReadyTimer = null;
-        wsSend(room.host, { type: "quickMatchReady" });
+
+        // 시작 요청이 준비 완료보다 먼저 도착했다면 방장은 이미 시작을 요청한 상태입니다.
+        // 이 경우 방장에게 quickMatchReady를 다시 보내 startMultiplayerMatch()를
+        // 두 번 실행시키지 않고, 대기 중인 matchStart만 게스트에게 전달합니다.
         if (room.quickStartRequested && room.lastStart) {
           wsSend(room.guest, room.lastStart);
           room.quickStartRequested = false;
+        } else {
+          wsSend(room.host, { type: "quickMatchReady" });
         }
       }
       return;
