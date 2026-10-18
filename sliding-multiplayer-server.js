@@ -1096,7 +1096,13 @@ function makeRoomState(room, host, guest, type) {
     round: 0,
     finishes: new Map(),
     eliminated: new Map(),
-    lastStart: null
+    // finish 직후 짧은 유예 시간을 두어 같은 라운드의 eliminated 메시지가
+    // 네트워크 순서 때문에 늦게 도착해도 목숨 소진(matchOver)이 우선되게 합니다.
+    finishResolveTimer: null,
+    finishResolveRound: null,
+    lastStart: null,
+    quickGuestReady: false,
+    quickStartRequested: false
   };
 }
 
@@ -1128,6 +1134,8 @@ function attachRoom(ws, room, role) {
 
 function finishRoom(room) {
   if (!room) return;
+  if (room.finishResolveTimer) clearTimeout(room.finishResolveTimer);
+  room.finishResolveTimer = null;
   rooms.delete(room.room);
   if (room.host) socketState.delete(room.host);
   if (room.guest) socketState.delete(room.guest);
@@ -1207,6 +1215,18 @@ wss.on("connection", ws => {
       return;
     }
 
+    if (data.type === "matchReady") {
+      if (room.type !== "quick" || state.role !== "guest") return;
+      room.quickGuestReady = true;
+      // 게스트가 실제로 매칭 메시지를 수신한 뒤에만 방장에게 시작을 허용합니다.
+      wsSend(room.host, { type: "quickMatchReady" });
+      if (room.quickStartRequested && room.lastStart) {
+        wsSend(room.guest, room.lastStart);
+        room.quickStartRequested = false;
+      }
+      return;
+    }
+
     if (data.type === "position") {
       // 이미 이번 라운드에서 탈락한 플레이어의 지연 위치 메시지는 전달하지 않습니다.
       if (room.eliminated.has(state.role)) return;
@@ -1216,7 +1236,15 @@ wss.on("connection", ws => {
 
     if (data.type === "matchStart") {
       if (state.role !== "host") return;
+      if (room.type === "quick" && !room.quickGuestReady) {
+        room.quickStartRequested = true;
+        return;
+      }
+      if (room.finishResolveTimer) clearTimeout(room.finishResolveTimer);
+      room.finishResolveTimer = null;
+      room.finishResolveRound = null;
       room.round = Number(data.round) || room.round + 1;
+      room.roundResolved = null;
       room.finishes.clear();
       room.eliminated.clear();
       room.lastStart = data;
@@ -1226,16 +1254,34 @@ wss.on("connection", ws => {
 
     if (data.type === "finish") {
       const round = Number(data.round) || room.round;
-      // 먼저 도착한 플레이어가 있으면 즉시 라운드를 끝내고 다음 맵으로 이동합니다.
       if (room.roundResolved === round) return;
-      room.roundResolved = round;
       room.finishes.set(state.role, data);
-      const otherRole = state.role === "host" ? "guest" : "host";
-      const payload = { type: "roundWon", round, winner: state.role, nextStart: data.position || { c: 1, r: 1 } };
-      wsSend(room.host, payload);
-      wsSend(room.guest, payload);
-      room.finishes.clear();
-      room.eliminated.clear();
+
+      // 먼저 도착한 finish를 즉시 확정하지 않습니다. 위험 블록으로 목숨이
+      // 0이 된 플레이어의 eliminated 메시지가 약간 늦게 도착할 수 있기 때문입니다.
+      // 유예 시간 동안 목숨 소진이 확인되면 matchOver가 라운드 클리어보다 우선합니다.
+      if (room.finishResolveTimer && room.finishResolveRound === round) return;
+      room.finishResolveRound = round;
+      room.finishResolveTimer = setTimeout(() => {
+        room.finishResolveTimer = null;
+        room.finishResolveRound = null;
+        if (room.roundResolved === round) return;
+
+        const finisherRole = room.finishes.keys().next().value;
+        if (!finisherRole) return;
+        room.roundResolved = round;
+        const finishData = room.finishes.get(finisherRole);
+        const payload = {
+          type: "roundWon",
+          round,
+          winner: finisherRole,
+          nextStart: finishData?.position || { c: 1, r: 1 }
+        };
+        wsSend(room.host, payload);
+        wsSend(room.guest, payload);
+        room.finishes.clear();
+        room.eliminated.clear();
+      }, 250);
       return;
     }
 
@@ -1247,8 +1293,11 @@ wss.on("connection", ws => {
       // 상대 화면에서도 탈락한 캐릭터를 즉시 숨깁니다.
       wsSend(peerOf(room, ws), { type: "opponentEliminated", round });
 
-      // 목숨을 모두 잃은 순간 경기를 종료합니다. 탈락한 쪽은 패배, 상대는 승리입니다.
+      // 목숨이 0인 탈락은 같은 라운드의 finish보다 우선합니다.
       if (Number(data.livesRemaining) <= 0) {
+        if (room.finishResolveTimer) clearTimeout(room.finishResolveTimer);
+        room.finishResolveTimer = null;
+        room.finishResolveRound = null;
         room.roundResolved = round;
         const payload = { type: "matchOver", winner: otherRole, loser: state.role };
         wsSend(room.host, payload);
@@ -1260,6 +1309,9 @@ wss.on("connection", ws => {
 
       // 둘 다 해당 맵에서 실패하면 무승부 라운드로 다음 맵으로 넘어갑니다.
       if (room.eliminated.has(otherRole)) {
+        if (room.finishResolveTimer) clearTimeout(room.finishResolveTimer);
+        room.finishResolveTimer = null;
+        room.finishResolveRound = null;
         room.roundResolved = round;
         const payload = { type: "roundWon", round, winner: "draw", nextStart: data.position || { c: 1, r: 1 } };
         wsSend(room.host, payload);
