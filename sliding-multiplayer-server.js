@@ -1102,7 +1102,9 @@ function makeRoomState(room, host, guest, type) {
     finishResolveRound: null,
     lastStart: null,
     quickGuestReady: false,
-    quickStartRequested: false
+    quickHostReady: false,
+    quickStartRequested: false,
+    quickReadyTimer: null
   };
 }
 
@@ -1135,7 +1137,9 @@ function attachRoom(ws, room, role) {
 function finishRoom(room) {
   if (!room) return;
   if (room.finishResolveTimer) clearTimeout(room.finishResolveTimer);
+  if (room.quickReadyTimer) clearTimeout(room.quickReadyTimer);
   room.finishResolveTimer = null;
+  room.quickReadyTimer = null;
   rooms.delete(room.room);
   if (room.host) socketState.delete(room.host);
   if (room.guest) socketState.delete(room.guest);
@@ -1149,6 +1153,14 @@ function pairQuickMatch(a, b) {
   attachRoom(b, room, "guest");
   wsSend(a, { type: "matchFound", role: "host" });
   wsSend(b, { type: "matchFound", role: "guest" });
+  // 한쪽 클라이언트가 매칭 알림을 받지 못하거나 준비 응답이 끊기면
+  // 빈 방을 무기한 유지하지 않고 두 플레이어 모두 다시 매칭할 수 있게 합니다.
+  room.quickReadyTimer = setTimeout(() => {
+    if (room.quickGuestReady && room.quickHostReady) return;
+    wsSend(room.host, { type: "quickMatchTimeout", message: "상대 연결이 완료되지 않았습니다. 다시 빠른 대전을 시도해 주세요." });
+    wsSend(room.guest, { type: "quickMatchTimeout", message: "상대 연결이 완료되지 않았습니다. 다시 빠른 대전을 시도해 주세요." });
+    finishRoom(room);
+  }, 12000);
 }
 
 wss.on("connection", ws => {
@@ -1216,13 +1228,22 @@ wss.on("connection", ws => {
     }
 
     if (data.type === "matchReady") {
-      if (room.type !== "quick" || state.role !== "guest") return;
-      room.quickGuestReady = true;
-      // 게스트가 실제로 매칭 메시지를 수신한 뒤에만 방장에게 시작을 허용합니다.
-      wsSend(room.host, { type: "quickMatchReady" });
-      if (room.quickStartRequested && room.lastStart) {
-        wsSend(room.guest, room.lastStart);
-        room.quickStartRequested = false;
+      if (room.type !== "quick") return;
+
+      // 두 클라이언트가 각자의 WebSocket에서 matchFound를 수신한 뒤
+      // 준비 완료를 보내도록 합니다. 게스트 준비만으로 시작을 허용하면
+      // quickMatchReady가 방장의 matchFound보다 먼저 도착할 수 있습니다.
+      if (state.role === "guest") room.quickGuestReady = true;
+      if (state.role === "host") room.quickHostReady = true;
+
+      if (room.quickGuestReady && room.quickHostReady) {
+        if (room.quickReadyTimer) clearTimeout(room.quickReadyTimer);
+        room.quickReadyTimer = null;
+        wsSend(room.host, { type: "quickMatchReady" });
+        if (room.quickStartRequested && room.lastStart) {
+          wsSend(room.guest, room.lastStart);
+          room.quickStartRequested = false;
+        }
       }
       return;
     }
@@ -1236,8 +1257,9 @@ wss.on("connection", ws => {
 
     if (data.type === "matchStart") {
       if (state.role !== "host") return;
-      if (room.type === "quick" && !room.quickGuestReady) {
+      if (room.type === "quick" && !(room.quickGuestReady && room.quickHostReady)) {
         room.quickStartRequested = true;
+        room.lastStart = data;
         return;
       }
       if (room.finishResolveTimer) clearTimeout(room.finishResolveTimer);
