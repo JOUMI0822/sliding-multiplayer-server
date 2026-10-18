@@ -800,7 +800,8 @@ app.post("/api/ranking/score", requireAuth, async (req, res) => {
         Prefer: "return=representation"
       },
       body: {
-        id: crypto.randomUUID(),
+        // game_scores.id is a BIGINT identity column in Supabase.
+        // Omit it so PostgreSQL generates the numeric ID automatically.
         account_id: req.account.id,
         clears: score.clears,
         max_streak: score.max_streak,
