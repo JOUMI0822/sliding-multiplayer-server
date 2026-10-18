@@ -1208,6 +1208,8 @@ wss.on("connection", ws => {
     }
 
     if (data.type === "position") {
+      // 이미 이번 라운드에서 탈락한 플레이어의 지연 위치 메시지는 전달하지 않습니다.
+      if (room.eliminated.has(state.role)) return;
       wsSend(peerOf(room, ws), data);
       return;
     }
@@ -1242,6 +1244,8 @@ wss.on("connection", ws => {
       if (room.roundResolved === round) return;
       room.eliminated.set(state.role, data);
       const otherRole = state.role === "host" ? "guest" : "host";
+      // 상대 화면에서도 탈락한 캐릭터를 즉시 숨깁니다.
+      wsSend(peerOf(room, ws), { type: "opponentEliminated", round });
 
       // 목숨을 모두 잃은 순간 경기를 종료합니다. 탈락한 쪽은 패배, 상대는 승리입니다.
       if (Number(data.livesRemaining) <= 0) {
