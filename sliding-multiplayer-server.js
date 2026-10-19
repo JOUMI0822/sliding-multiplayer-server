@@ -1193,7 +1193,27 @@ function pairQuickMatch(a, b) {
   }, 25000);
 }
 
+// Render 및 중간 프록시의 유휴 연결 종료를 줄이기 위한 WebSocket heartbeat.
+// pong을 돌려주지 않는 연결만 종료하고, 정상 연결은 주기적으로 ping합니다.
+const websocketHeartbeat = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws.readyState !== 1) continue;
+    if (ws.isAlive === false) {
+      quickDebug(ws, "heartbeatTimeout");
+      ws.terminate();
+      continue;
+    }
+    ws.isAlive = false;
+    try { ws.ping(); } catch (error) {
+      quickDebug(ws, "heartbeatPingError", { message: String(error?.message || error) });
+    }
+  }
+}, 20000);
+websocketHeartbeat.unref?.();
+
 wss.on("connection", ws => {
+  ws.isAlive = true;
+  ws.on("pong", () => { ws.isAlive = true; });
   ws._quickDebugId = nextWsDebugId++;
   socketState.set(ws, { room: null, role: null });
   quickDebug(ws, "wsConnected");
