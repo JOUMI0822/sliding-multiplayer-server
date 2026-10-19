@@ -1152,7 +1152,8 @@ function notifyPeerLeft(room, leaving) {
 }
 
 function attachRoom(ws, room, role) {
-  socketState.set(ws, { room: room.room, role });
+  // 큐 대기 상태를 제거하고 역할/방 정보를 한 번에 교체합니다.
+  socketState.set(ws, { room: room.room, role, queued: false });
   if (role === "host") room.host = ws;
   else room.guest = ws;
 }
@@ -1193,27 +1194,7 @@ function pairQuickMatch(a, b) {
   }, 25000);
 }
 
-// Render 및 중간 프록시의 유휴 연결 종료를 줄이기 위한 WebSocket heartbeat.
-// pong을 돌려주지 않는 연결만 종료하고, 정상 연결은 주기적으로 ping합니다.
-const websocketHeartbeat = setInterval(() => {
-  for (const ws of wss.clients) {
-    if (ws.readyState !== 1) continue;
-    if (ws.isAlive === false) {
-      quickDebug(ws, "heartbeatTimeout");
-      ws.terminate();
-      continue;
-    }
-    ws.isAlive = false;
-    try { ws.ping(); } catch (error) {
-      quickDebug(ws, "heartbeatPingError", { message: String(error?.message || error) });
-    }
-  }
-}, 20000);
-websocketHeartbeat.unref?.();
-
 wss.on("connection", ws => {
-  ws.isAlive = true;
-  ws.on("pong", () => { ws.isAlive = true; });
   ws._quickDebugId = nextWsDebugId++;
   socketState.set(ws, { room: null, role: null });
   quickDebug(ws, "wsConnected");
@@ -1234,9 +1215,18 @@ wss.on("connection", ws => {
     }
 
     if (data.type === "matchmake") {
+      // 중복 요청이나 이미 끊긴 소켓이 큐에 남아 잘못 연결되는 일을 방지합니다.
       removeFromQueue(ws);
-      const other = quickQueue.shift();
-      if (other && other.readyState === 1 && other !== ws) {
+      let other = null;
+      while (quickQueue.length) {
+        const candidate = quickQueue.shift();
+        const candidateState = socketState.get(candidate);
+        if (candidate !== ws && candidate.readyState === 1 && !candidateState?.room) {
+          other = candidate;
+          break;
+        }
+      }
+      if (other) {
         quickDebug(ws, "matchmakePaired", { otherWs: other?._quickDebugId || null });
         pairQuickMatch(other, ws);
       } else {
@@ -1340,8 +1330,20 @@ wss.on("connection", ws => {
       room.finishes.clear();
       room.eliminated.clear();
       room.lastStart = data;
-      quickDebug(ws, "forwardMatchStartToGuest", { round: data.round, guestWs: room.guest?._quickDebugId || null });
-      wsSend(room.guest, data);
+      quickDebug(ws, "forwardMatchStartToGuest", {
+        round: data.round,
+        guestWs: room.guest?._quickDebugId || null,
+        guestReadyState: room.guest?.readyState ?? null,
+        guestReady: room.quickGuestReady,
+        hostReady: room.quickHostReady
+      });
+      if (room.guest && room.guest.readyState === 1) {
+        wsSend(room.guest, data);
+        quickDebug(room.guest, "matchStartDeliveredToGuest", { round: data.round });
+      } else {
+        quickDebug(ws, "matchStartGuestSocketNotOpen", { round: data.round });
+        wsSend(ws, { type: "error", message: "상대 연결이 끊어졌습니다. 빠른 대전을 다시 시도해 주세요." });
+      }
       return;
     }
 
