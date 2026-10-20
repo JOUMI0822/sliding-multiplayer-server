@@ -1221,19 +1221,8 @@ wss.on("connection", ws => {
     }
 
     const state = socketState.get(ws) || { room: null, role: null };
-    if (["matchmake", "matchReady", "matchStart", "matchStartAck", "create", "join"].includes(data.type)) {
-      quickDebug(ws, "received:" + data.type, data.type === "matchStart" ? { round: data.round } : (data.type === "matchStartAck" ? { round: data.round, phase: data.phase } : {}));
-    }
-
-    // 게스트가 matchStart를 받았는지, 게임 상태까지 전환했는지 구분하기 위한 확인 응답
-    if (data.type === "matchStartAck") {
-      quickDebug(ws, "guestMatchStartAck", {
-        round: Number(data.round) || 0,
-        phase: String(data.phase || "unknown"),
-        role: state.role,
-        room: state.room
-      });
-      return;
+    if (["matchmake", "matchReady", "matchStart", "create", "join"].includes(data.type)) {
+      quickDebug(ws, "received:" + data.type, data.type === "matchStart" ? { round: data.round } : {});
     }
 
     if (data.type === "matchmake") {
@@ -1343,19 +1332,17 @@ wss.on("connection", ws => {
       room.finishes.clear();
       room.eliminated.clear();
       room.lastStart = data;
-      const guestReadyState = room.guest ? room.guest.readyState : null;
       quickDebug(ws, "forwardMatchStartToGuest", {
         round: data.round,
         guestWs: room.guest?._quickDebugId || null,
-        guestReadyState,
-        guestRole: peerOf(room, ws) === room.guest ? "guest" : "unknown"
+        wallCount: Array.isArray(data.walls) ? data.walls.length : 0,
+        dangerCount: Array.isArray(data.dangers) ? data.dangers.length : 0,
+        hasGoal: !!data.goal,
+        guestReadyState: room.guest?.readyState ?? null
       });
-      if (room.guest && room.guest.readyState === 1) {
-        wsSend(room.guest, data);
-        quickDebug(ws, "matchStartSendAttempted", { round: data.round, guestWs: room.guest?._quickDebugId || null });
-      } else {
-        quickDebug(ws, "matchStartSendSkippedGuestNotOpen", { round: data.round, guestReadyState });
-      }
+      // 경기 맵은 방장 권한(authoritative)입니다. 게스트가 별도로 맵을 생성하지 않도록
+      // 방장이 보낸 동일한 matchStart/map payload를 그대로 전달합니다.
+      wsSend(room.guest, data);
       return;
     }
 
