@@ -1133,11 +1133,87 @@ function makeRoomState(room, host, guest, type) {
     finishResolveTimer: null,
     finishResolveRound: null,
     lastStart: null,
+    stats: { host: newPlayerStats(), guest: newPlayerStats() },
+    matchEndTimer: null,
+    matchEndRound: null,
     quickGuestReady: false,
     quickHostReady: false,
     quickStartRequested: false,
     quickReadyTimer: null
   };
+}
+
+/* ---------- 대전 점수 (클라이언트 calculateV28Score와 같은 공식) ----------
+   clears * 50 + maxStreak * 100 - lifeLosses * 10  (대전에서는 맵 넘기기 없음) */
+function newPlayerStats() {
+  return { clears: 0, streak: 0, maxStreak: 0, lifeLosses: 0, elimRounds: new Set() };
+}
+
+function statScore(st) {
+  return Math.max(0, st.clears * 50 + st.maxStreak * 100 - st.lifeLosses * 10);
+}
+
+function roomScores(room) {
+  return { host: statScore(room.stats.host), guest: statScore(room.stats.guest) };
+}
+
+function creditRoundWin(room, role) {
+  const mine = room.stats[role];
+  const other = room.stats[role === "host" ? "guest" : "host"];
+  mine.clears++;
+  mine.streak++;
+  mine.maxStreak = Math.max(mine.maxStreak, mine.streak);
+  other.streak = 0;
+}
+
+function creditElimination(room, role, round) {
+  const st = room.stats[role];
+  if (st.elimRounds.has(round)) return;     // 같은 라운드 중복 집계 방지
+  st.elimRounds.add(round);
+  st.lifeLosses++;
+  st.streak = 0;
+}
+
+function broadcastScores(room) {
+  const payload = { type: "scoreUpdate", scores: roomScores(room) };
+  wsSend(room.host, payload);
+  wsSend(room.guest, payload);
+}
+
+// 누군가 목숨을 모두 잃으면 짧은 유예(350ms) 뒤 경기를 종료하고 점수가 높은 쪽을 승자로 정합니다.
+// 유예 동안 같은 라운드의 골인/상대 탈락 메시지가 늦게 도착해도 점수에 반영됩니다.
+function resolveMatchEnd(room) {
+  room.matchEndTimer = null;
+  if (room.over) return;
+
+  if (room.roundResolved !== room.round) {
+    for (const role of room.finishes.keys()) {
+      if (!room.stats[role].elimRounds.has(room.round)) {
+        creditRoundWin(room, role);
+        room.roundResolved = room.round;
+        break;
+      }
+    }
+  }
+
+  const scores = roomScores(room);
+  let winner = "draw";
+  if (scores.host > scores.guest) winner = "host";
+  else if (scores.guest > scores.host) winner = "guest";
+
+  room.over = true;
+  const payload = {
+    type: "matchOver",
+    winner,
+    loser: winner === "draw" ? null : (winner === "host" ? "guest" : "host"),
+    scores,
+    reason: "lives"
+  };
+  console.log("[ROUND]", JSON.stringify({ ev: "matchOver", room: room.room, winner, scores }));
+  wsSend(room.host, payload);
+  wsSend(room.guest, payload);
+  room.finishes.clear();
+  room.eliminated.clear();
 }
 
 function peerOf(room, ws) {
@@ -1162,6 +1238,8 @@ function finishRoom(room) {
   if (room.quickReadyTimer) clearTimeout(room.quickReadyTimer);
   room.finishResolveTimer = null;
   room.quickReadyTimer = null;
+  if (room.matchEndTimer) clearTimeout(room.matchEndTimer);
+  room.matchEndTimer = null;
   rooms.delete(room.room);
   if (room.host) socketState.delete(room.host);
   if (room.guest) socketState.delete(room.guest);
@@ -1341,7 +1419,7 @@ wss.on("connection", ws => {
     /* ---------- 라운드 시작 (방장 전용) ---------- */
     if (data.type === "matchStart") {
       if (state.role !== "host") return;
-      if (room.over || !room.guest) return;
+      if (room.over || !room.guest || room.matchEndTimer) return;
 
       if (room.type === "quick" && !(room.quickGuestReady && room.quickHostReady)) {
         room.quickStartRequested = true;
@@ -1371,23 +1449,26 @@ wss.on("connection", ws => {
       if (round !== room.round) return;           // 지난 라운드의 늦은 메시지 무시
       if (room.roundResolved === round) return;
       room.finishes.set(state.role, data);
+      if (room.matchEndTimer) return;             // 경기 종료 유예 중: 기록만 남기고 종료 때 점수 반영
 
       if (room.finishResolveTimer && room.finishResolveRound === round) return;
       room.finishResolveRound = round;
       room.finishResolveTimer = setTimeout(() => {
         room.finishResolveTimer = null;
         room.finishResolveRound = null;
-        if (room.over || room.roundResolved === round) return;
+        if (room.over || room.matchEndTimer || room.roundResolved === round) return;
 
         const finisherRole = room.finishes.keys().next().value;
         if (!finisherRole) return;
         room.roundResolved = round;
         const finishData = room.finishes.get(finisherRole);
+        creditRoundWin(room, finisherRole);
         const payload = {
           type: "roundWon",
           round,
           winner: finisherRole,
-          nextStart: finishData?.position || { c: 1, r: 1 }
+          nextStart: finishData?.position || { c: 1, r: 1 },
+          scores: roomScores(room)
         };
         console.log("[ROUND]", JSON.stringify({ ev: "roundWon", room: room.room, round, winner: finisherRole }));
         wsSend(room.host, payload);
@@ -1403,36 +1484,46 @@ wss.on("connection", ws => {
       if (room.over) return;
       const round = Number(data.round) || room.round;
       const otherRole = state.role === "host" ? "guest" : "host";
+      const lethal = Number(data.livesRemaining) <= 0;
       console.log("[ROUND]", JSON.stringify({ ev: "eliminated", room: room.room, role: state.role, round, lives: data.livesRemaining }));
 
-      // 목숨 0은 라운드 종료 여부/라운드 번호와 상관없이 항상 경기 종료
-      if (Number(data.livesRemaining) <= 0) {
+      // 목숨 손실은 점수(-10)에 반영
+      creditElimination(room, state.role, round);
+
+      const live = round === room.round && room.roundResolved !== round;
+      if (live) {
+        room.eliminated.set(state.role, data);
+        wsSend(peerOf(room, ws), { type: "opponentEliminated", round });
+      }
+
+      // 목숨 0: 경기 종료 → 점수 비교로 승패 결정 (짧은 유예 후)
+      if (lethal) {
         if (room.finishResolveTimer) clearTimeout(room.finishResolveTimer);
         room.finishResolveTimer = null;
         room.finishResolveRound = null;
-        room.roundResolved = round;
-        room.over = true;
-        const payload = { type: "matchOver", winner: otherRole, loser: state.role };
-        console.log("[ROUND]", JSON.stringify({ ev: "matchOver", room: room.room, winner: otherRole }));
-        wsSend(room.host, payload);
-        wsSend(room.guest, payload);
-        room.finishes.clear();
-        room.eliminated.clear();
+        if (!room.matchEndTimer) {
+          room.matchEndRound = round;
+          room.matchEndTimer = setTimeout(() => resolveMatchEnd(room), 350);
+        }
         return;
       }
 
-      if (round !== room.round) return;
-      if (room.roundResolved === round) return;
-
-      room.eliminated.set(state.role, data);
-      wsSend(peerOf(room, ws), { type: "opponentEliminated", round });
+      broadcastScores(room);
+      if (room.matchEndTimer) return;
+      if (!live) return;
 
       if (room.eliminated.has(otherRole)) {
         if (room.finishResolveTimer) clearTimeout(room.finishResolveTimer);
         room.finishResolveTimer = null;
         room.finishResolveRound = null;
         room.roundResolved = round;
-        const payload = { type: "roundWon", round, winner: "draw", nextStart: data.position || { c: 1, r: 1 } };
+        const payload = {
+          type: "roundWon",
+          round,
+          winner: "draw",
+          nextStart: data.position || { c: 1, r: 1 },
+          scores: roomScores(room)
+        };
         wsSend(room.host, payload);
         wsSend(room.guest, payload);
         room.finishes.clear();
