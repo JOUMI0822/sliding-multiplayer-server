@@ -1312,6 +1312,30 @@ wss.on("connection", ws => {
     if (data.type === "position") {
       // 이미 이번 라운드에서 탈락한 플레이어의 지연 위치 메시지는 전달하지 않습니다.
       if (room.eliminated.has(state.role)) return;
+      // 브라우저가 보내는 위치 패킷이 쌓이지 않도록 플레이어별 최신 위치만
+      // 최대 초당 20회 전달합니다. 초기 위치(force)는 같은 메시지 형식으로 처리됩니다.
+      const now = Date.now();
+      const socketInfo = socketState.get(ws) || {};
+      if (socketInfo.lastPositionRelayAt && now - socketInfo.lastPositionRelayAt < 50) {
+        socketInfo.pendingPosition = data;
+        socketState.set(ws, socketInfo);
+        if (!socketInfo.positionRelayTimer) {
+          socketInfo.positionRelayTimer = setTimeout(() => {
+            const latestState = socketState.get(ws);
+            if (!latestState) return;
+            latestState.positionRelayTimer = null;
+            const latest = latestState.pendingPosition;
+            latestState.pendingPosition = null;
+            if (latest && ws.readyState === 1) {
+              latestState.lastPositionRelayAt = Date.now();
+              wsSend(peerOf(room, ws), latest);
+            }
+          }, Math.max(1, 50 - (now - socketInfo.lastPositionRelayAt)));
+        }
+        return;
+      }
+      socketInfo.lastPositionRelayAt = now;
+      socketState.set(ws, socketInfo);
       wsSend(peerOf(room, ws), data);
       return;
     }
@@ -1419,6 +1443,8 @@ wss.on("connection", ws => {
 
   ws.on("close", (code, reason) => {
     quickDebug(ws, "wsClosed", { closeCode: code, closeReason: String(reason || "") });
+    const closingState = socketState.get(ws);
+    if (closingState?.positionRelayTimer) clearTimeout(closingState.positionRelayTimer);
     removeFromQueue(ws);
     const room = roomFor(ws);
     if (room) {
