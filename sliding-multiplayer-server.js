@@ -1157,8 +1157,14 @@ function notifyPeerLeft(room, leaving) {
   const peer = peerOf(room, leaving);
   if (peer) {
     wsSend(peer, { type: "peerLeft" });
+    // 방이 종료/교체되었거나 상대 소켓이 이미 다른 방에 들어갔다면
+    // 오래된 타이머가 새 경기 상태를 덮어쓰지 않도록 확인합니다.
     setTimeout(() => {
-      if (peer.readyState === 1) wsSend(peer, { type: "playerLeftTimeout", winner: socketState.get(peer)?.role || "draw" });
+      if (peer.readyState !== 1) return;
+      const peerState = socketState.get(peer);
+      const currentRoom = peerState?.room ? rooms.get(peerState.room) : null;
+      if (currentRoom !== room || peerOf(room, leaving) !== peer) return;
+      wsSend(peer, { type: "playerLeftTimeout", winner: peerState?.role || "draw" });
     }, 10000);
   }
 }
