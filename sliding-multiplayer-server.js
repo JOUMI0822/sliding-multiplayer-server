@@ -462,6 +462,7 @@ app.get("/api/health", (req, res) => {
   res.json({
     ok: true,
     version: "V29",
+    multiplayerRules: "both-dead-or-5000",
     dailyRanking: true,
     weeklyRanking: true,
     scoreFormula: SCORE_FORMULA,
@@ -1127,6 +1128,7 @@ function makeRoomState(room, host, guest, type) {
     round: 0,
     started: false,       // 첫 matchStart가 전달된 뒤 true
     over: false,          // matchOver / 기권 처리 뒤 true (이후 알림 전송 금지)
+    dead: { host: false, guest: false },   // 목숨 0이 된 플레이어
     roundResolved: null,
     finishes: new Map(),
     eliminated: new Map(),
@@ -1180,8 +1182,48 @@ function broadcastScores(room) {
   wsSend(room.guest, payload);
 }
 
-// 누군가 목숨을 모두 잃으면 짧은 유예(350ms) 뒤 경기를 종료하고 점수가 높은 쪽을 승자로 정합니다.
-// 유예 동안 같은 라운드의 골인/상대 탈락 메시지가 늦게 도착해도 점수에 반영됩니다.
+const WIN_SCORE = 5000;
+
+function endMatch(room, winner, reason) {
+  if (room.over) return;
+  if (room.finishResolveTimer) clearTimeout(room.finishResolveTimer);
+  room.finishResolveTimer = null;
+  room.finishResolveRound = null;
+  if (room.matchEndTimer) clearTimeout(room.matchEndTimer);
+  room.matchEndTimer = null;
+
+  room.over = true;
+  const scores = roomScores(room);
+  const payload = {
+    type: "matchOver",
+    winner,
+    loser: winner === "draw" ? null : (winner === "host" ? "guest" : "host"),
+    scores,
+    reason
+  };
+  console.log("[ROUND]", JSON.stringify({ ev: "matchOver", room: room.room, winner, scores, reason }));
+  wsSend(room.host, payload);
+  wsSend(room.guest, payload);
+  room.finishes.clear();
+  room.eliminated.clear();
+}
+
+// 5000점 도달 검사. 도달했으면 경기를 끝내고 true 반환
+function checkScoreWin(room) {
+  const s = roomScores(room);
+  const hostHit = s.host >= WIN_SCORE;
+  const guestHit = s.guest >= WIN_SCORE;
+  if (!hostHit && !guestHit) return false;
+
+  let winner;
+  if (hostHit && guestHit) winner = s.host > s.guest ? "host" : s.guest > s.host ? "guest" : "draw";
+  else winner = hostHit ? "host" : "guest";
+
+  endMatch(room, winner, "score");
+  return true;
+}
+
+// 둘 다 목숨을 잃었을 때: 짧은 유예(350ms) 뒤 점수가 높은 쪽이 승리
 function resolveMatchEnd(room) {
   room.matchEndTimer = null;
   if (room.over) return;
@@ -1201,19 +1243,7 @@ function resolveMatchEnd(room) {
   if (scores.host > scores.guest) winner = "host";
   else if (scores.guest > scores.host) winner = "guest";
 
-  room.over = true;
-  const payload = {
-    type: "matchOver",
-    winner,
-    loser: winner === "draw" ? null : (winner === "host" ? "guest" : "host"),
-    scores,
-    reason: "lives"
-  };
-  console.log("[ROUND]", JSON.stringify({ ev: "matchOver", room: room.room, winner, scores }));
-  wsSend(room.host, payload);
-  wsSend(room.guest, payload);
-  room.finishes.clear();
-  room.eliminated.clear();
+  endMatch(room, winner, "lives");
 }
 
 function peerOf(room, ws) {
@@ -1389,6 +1419,7 @@ wss.on("connection", ws => {
     if (data.type === "position") {
       if (room.over) return;
       if (room.eliminated.has(state.role)) return;
+      if (room.dead[state.role]) return;
 
       const now = Date.now();
       const socketInfo = socketState.get(ws) || {};
@@ -1444,6 +1475,7 @@ wss.on("connection", ws => {
     /* ---------- 골인 ---------- */
     if (data.type === "finish") {
       if (room.over) return;
+      if (room.dead[state.role]) return;
       const round = Number(data.round) || room.round;
       console.log("[ROUND]", JSON.stringify({ ev: "finish", room: room.room, role: state.role, round, serverRound: room.round }));
       if (round !== room.round) return;           // 지난 라운드의 늦은 메시지 무시
@@ -1463,6 +1495,7 @@ wss.on("connection", ws => {
         room.roundResolved = round;
         const finishData = room.finishes.get(finisherRole);
         creditRoundWin(room, finisherRole);
+        if (checkScoreWin(room)) return;   // 5000점 도달 시 즉시 종료
         const payload = {
           type: "roundWon",
           round,
@@ -1496,23 +1529,27 @@ wss.on("connection", ws => {
         wsSend(peerOf(room, ws), { type: "opponentEliminated", round });
       }
 
-      // 목숨 0: 경기 종료 → 점수 비교로 승패 결정 (짧은 유예 후)
+      // 목숨 0: 사망 처리. 둘 다 죽었을 때만 경기를 끝낸다.
       if (lethal) {
-        if (room.finishResolveTimer) clearTimeout(room.finishResolveTimer);
-        room.finishResolveTimer = null;
-        room.finishResolveRound = null;
-        if (!room.matchEndTimer) {
-          room.matchEndRound = round;
-          room.matchEndTimer = setTimeout(() => resolveMatchEnd(room), 350);
+        room.dead[state.role] = true;
+        if (room.dead.host && room.dead.guest) {
+          if (room.finishResolveTimer) clearTimeout(room.finishResolveTimer);
+          room.finishResolveTimer = null;
+          room.finishResolveRound = null;
+          if (!room.matchEndTimer) {
+            room.matchEndRound = round;
+            room.matchEndTimer = setTimeout(() => resolveMatchEnd(room), 350);
+          }
+          return;
         }
-        return;
+        // 한 명만 죽음 → 경기 계속 (아래 일반 탈락 처리로 진행)
       }
 
       broadcastScores(room);
       if (room.matchEndTimer) return;
       if (!live) return;
 
-      if (room.eliminated.has(otherRole)) {
+      if (room.eliminated.has(otherRole) || room.dead[otherRole]) {
         if (room.finishResolveTimer) clearTimeout(room.finishResolveTimer);
         room.finishResolveTimer = null;
         room.finishResolveRound = null;
@@ -1584,4 +1621,5 @@ httpServer.listen(PORT, () => {
   console.log("Weekly ranking: ON (Monday-Sunday, Asia/Seoul)");
   console.log(`Score: ${SCORE_FORMULA}`);
   console.log("WebSocket multiplayer: ON");
+  console.log("[RULES] 2인 대전: 둘 다 목숨 0일 때 점수 비교 / 5000점 도달 시 즉시 승리 (both-dead-or-5000)");
 });
