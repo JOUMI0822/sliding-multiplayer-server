@@ -320,6 +320,16 @@ function parseCookies(header) {
 }
 
 function getSessionPayload(req) {
+  // Prefer the browser-specific bearer token. It is reliable even when
+  // Safari blocks third-party cookies for GitHub Pages -> Render requests.
+  const authorization = String(req.headers.authorization || "");
+  const match = authorization.match(/^Bearer\\s+(.+)$/i);
+  if (match && match[1]) {
+    const bearerSession = parseSessionToken(match[1]);
+    if (bearerSession) return bearerSession;
+  }
+
+  // Keep cookie fallback for compatibility with older frontends.
   const cookies = parseCookies(req.headers.cookie);
   return parseSessionToken(cookies[SESSION_COOKIE]);
 }
@@ -592,7 +602,9 @@ app.post("/api/login", async (req, res) => {
       user: {
         id: account.id,
         nickname: account.nickname
-      }
+      },
+      // Stored only in the current browser's localStorage by the frontend.
+      sessionToken: token
     });
   } catch (error) {
     console.error(`[LOGIN ${requestId}] ERROR`, error);
@@ -1152,8 +1164,7 @@ function notifyPeerLeft(room, leaving) {
 }
 
 function attachRoom(ws, room, role) {
-  // 큐 대기 상태를 제거하고 역할/방 정보를 한 번에 교체합니다.
-  socketState.set(ws, { room: room.room, role, queued: false });
+  socketState.set(ws, { room: room.room, role });
   if (role === "host") room.host = ws;
   else room.guest = ws;
 }
@@ -1215,18 +1226,9 @@ wss.on("connection", ws => {
     }
 
     if (data.type === "matchmake") {
-      // 중복 요청이나 이미 끊긴 소켓이 큐에 남아 잘못 연결되는 일을 방지합니다.
       removeFromQueue(ws);
-      let other = null;
-      while (quickQueue.length) {
-        const candidate = quickQueue.shift();
-        const candidateState = socketState.get(candidate);
-        if (candidate !== ws && candidate.readyState === 1 && !candidateState?.room) {
-          other = candidate;
-          break;
-        }
-      }
-      if (other) {
+      const other = quickQueue.shift();
+      if (other && other.readyState === 1 && other !== ws) {
         quickDebug(ws, "matchmakePaired", { otherWs: other?._quickDebugId || null });
         pairQuickMatch(other, ws);
       } else {
@@ -1330,20 +1332,8 @@ wss.on("connection", ws => {
       room.finishes.clear();
       room.eliminated.clear();
       room.lastStart = data;
-      quickDebug(ws, "forwardMatchStartToGuest", {
-        round: data.round,
-        guestWs: room.guest?._quickDebugId || null,
-        guestReadyState: room.guest?.readyState ?? null,
-        guestReady: room.quickGuestReady,
-        hostReady: room.quickHostReady
-      });
-      if (room.guest && room.guest.readyState === 1) {
-        wsSend(room.guest, data);
-        quickDebug(room.guest, "matchStartDeliveredToGuest", { round: data.round });
-      } else {
-        quickDebug(ws, "matchStartGuestSocketNotOpen", { round: data.round });
-        wsSend(ws, { type: "error", message: "상대 연결이 끊어졌습니다. 빠른 대전을 다시 시도해 주세요." });
-      }
+      quickDebug(ws, "forwardMatchStartToGuest", { round: data.round, guestWs: room.guest?._quickDebugId || null });
+      wsSend(room.guest, data);
       return;
     }
 
