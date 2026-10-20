@@ -1157,14 +1157,8 @@ function notifyPeerLeft(room, leaving) {
   const peer = peerOf(room, leaving);
   if (peer) {
     wsSend(peer, { type: "peerLeft" });
-    // 방이 종료/교체되었거나 상대 소켓이 이미 다른 방에 들어갔다면
-    // 오래된 타이머가 새 경기 상태를 덮어쓰지 않도록 확인합니다.
     setTimeout(() => {
-      if (peer.readyState !== 1) return;
-      const peerState = socketState.get(peer);
-      const currentRoom = peerState?.room ? rooms.get(peerState.room) : null;
-      if (currentRoom !== room || peerOf(room, leaving) !== peer) return;
-      wsSend(peer, { type: "playerLeftTimeout", winner: peerState?.role || "draw" });
+      if (peer.readyState === 1) wsSend(peer, { type: "playerLeftTimeout", winner: socketState.get(peer)?.role || "draw" });
     }, 10000);
   }
 }
@@ -1227,8 +1221,19 @@ wss.on("connection", ws => {
     }
 
     const state = socketState.get(ws) || { room: null, role: null };
-    if (["matchmake", "matchReady", "matchStart", "create", "join"].includes(data.type)) {
-      quickDebug(ws, "received:" + data.type, data.type === "matchStart" ? { round: data.round } : {});
+    if (["matchmake", "matchReady", "matchStart", "matchStartAck", "create", "join"].includes(data.type)) {
+      quickDebug(ws, "received:" + data.type, data.type === "matchStart" ? { round: data.round } : (data.type === "matchStartAck" ? { round: data.round, phase: data.phase } : {}));
+    }
+
+    // 게스트가 matchStart를 받았는지, 게임 상태까지 전환했는지 구분하기 위한 확인 응답
+    if (data.type === "matchStartAck") {
+      quickDebug(ws, "guestMatchStartAck", {
+        round: Number(data.round) || 0,
+        phase: String(data.phase || "unknown"),
+        role: state.role,
+        room: state.room
+      });
+      return;
     }
 
     if (data.type === "matchmake") {
@@ -1338,8 +1343,19 @@ wss.on("connection", ws => {
       room.finishes.clear();
       room.eliminated.clear();
       room.lastStart = data;
-      quickDebug(ws, "forwardMatchStartToGuest", { round: data.round, guestWs: room.guest?._quickDebugId || null });
-      wsSend(room.guest, data);
+      const guestReadyState = room.guest ? room.guest.readyState : null;
+      quickDebug(ws, "forwardMatchStartToGuest", {
+        round: data.round,
+        guestWs: room.guest?._quickDebugId || null,
+        guestReadyState,
+        guestRole: peerOf(room, ws) === room.guest ? "guest" : "unknown"
+      });
+      if (room.guest && room.guest.readyState === 1) {
+        wsSend(room.guest, data);
+        quickDebug(ws, "matchStartSendAttempted", { round: data.round, guestWs: room.guest?._quickDebugId || null });
+      } else {
+        quickDebug(ws, "matchStartSendSkippedGuestNotOpen", { round: data.round, guestReadyState });
+      }
       return;
     }
 
