@@ -648,6 +648,8 @@ app.get("/api/me", requireAuth, async (req, res) => {
    - each next level requires +50 EXP
 ========================================================= */
 
+const MAX_LEVEL = 100;
+
 function getLevelRequiredExp(level) {
   const lv = Math.max(1, Math.floor(Number(level) || 1));
   return 100 + (lv - 1) * 50;
@@ -657,9 +659,14 @@ function normalizeAccountProgress(level, exp) {
   let lv = Math.max(1, Math.floor(Number(level) || 1));
   let xp = Math.max(0, Math.floor(Number(exp) || 0));
 
-  while (xp >= getLevelRequiredExp(lv)) {
+  while (lv < MAX_LEVEL && xp >= getLevelRequiredExp(lv)) {
     xp -= getLevelRequiredExp(lv);
     lv++;
+  }
+
+  if (lv >= MAX_LEVEL) {
+    lv = MAX_LEVEL;
+    xp = 0;
   }
 
   return { level: lv, exp: xp };
@@ -674,6 +681,97 @@ async function selectAccountProgress(accountId) {
 
   return normalizeAccountProgress(rows[0].level, rows[0].exp);
 }
+
+/* =========================================================
+   Level rewards (Lv.2 ~ Lv.100)
+   - 서버가 보상표와 수령 여부(accounts.claimed_level)를 관리합니다.
+   - 필요한 SQL:
+       alter table accounts add column if not exists claimed_level integer not null default 1;
+   - 매 레벨: 코인 5 + floor(level / 20)
+   - 5의 배수 레벨: 아이템 1개 (5종 순환)
+   - 10의 배수 레벨: 아이템 1개 추가 + 코인 +10
+   - Lv.100: 코인 +80, 모든 아이템 +2
+========================================================= */
+
+const REWARD_ITEM_TYPES = ["timeClock", "energyShield", "pathGuide", "firstAid", "energyRecovery"];
+
+function getLevelReward(level) {
+  const lv = Math.max(2, Math.floor(Number(level) || 2));
+  const reward = { level: lv, coins: 5 + Math.floor(lv / 20), items: {} };
+  const addItem = (type, amount) => {
+    reward.items[type] = (reward.items[type] || 0) + amount;
+  };
+
+  if (lv % 5 === 0) {
+    const index = lv / 5 - 1;
+    addItem(REWARD_ITEM_TYPES[index % REWARD_ITEM_TYPES.length], 1);
+
+    if (lv % 10 === 0) {
+      addItem(REWARD_ITEM_TYPES[(index + 2) % REWARD_ITEM_TYPES.length], 1);
+      reward.coins += 10;
+    }
+  }
+
+  if (lv === MAX_LEVEL) {
+    reward.coins += 80;
+    REWARD_ITEM_TYPES.forEach(type => addItem(type, 2));
+    reward.special = true;
+  }
+
+  return reward;
+}
+
+app.post("/api/progress/claim-rewards", requireAuth, async (req, res) => {
+  try {
+    const accountId = escapeSupabaseValue(req.account.id);
+    const rows = await supabaseRequest("accounts", {
+      query: `?select=id,level,exp,claimed_level&id=eq.${accountId}&limit=1`
+    });
+
+    const row = Array.isArray(rows) && rows.length ? rows[0] : null;
+    if (!row) {
+      return res.status(404).json({ error: "계정을 찾을 수 없습니다." });
+    }
+
+    const progress = normalizeAccountProgress(row.level, row.exp);
+    const rawClaimed = row.claimed_level;
+    const claimed = Math.max(1, Math.floor(Number(rawClaimed) || 1));
+
+    if (progress.level <= claimed) {
+      return res.json({ entries: [], claimedLevel: claimed });
+    }
+
+    const entries = [];
+    for (let lv = claimed + 1; lv <= progress.level; lv++) {
+      entries.push(getLevelReward(lv));
+    }
+
+    // 동시에 두 기기에서 수령해도 한 번만 지급되도록, 읽은 값과 같을 때만 갱신합니다.
+    const guard =
+      rawClaimed === null || rawClaimed === undefined
+        ? "claimed_level=is.null"
+        : `claimed_level=eq.${Number(rawClaimed)}`;
+
+    const updated = await supabaseRequest("accounts", {
+      method: "PATCH",
+      query: `?id=eq.${accountId}&${guard}&select=id`,
+      headers: { Prefer: "return=representation" },
+      body: { claimed_level: progress.level }
+    });
+
+    if (!Array.isArray(updated) || !updated.length) {
+      return res.json({ entries: [], claimedLevel: claimed });
+    }
+
+    res.json({ entries, claimedLevel: progress.level });
+  } catch (error) {
+    console.error("[REWARD] claim failed", error);
+    if (error?.supabase) {
+      console.error("[REWARD] SUPABASE_ERROR", JSON.stringify(error.supabase));
+    }
+    res.status(500).json({ error: "레벨 보상을 받지 못했습니다." });
+  }
+});
 
 app.get("/api/progress", requireAuth, async (req, res) => {
   try {
@@ -711,7 +809,7 @@ app.post("/api/progress/award", requireAuth, async (req, res) => {
     let exp = current.exp;
     let remaining = amount;
 
-    while (remaining > 0) {
+    while (remaining > 0 && level < MAX_LEVEL) {
       const required = getLevelRequiredExp(level);
       const add = Math.min(remaining, required - exp);
 
