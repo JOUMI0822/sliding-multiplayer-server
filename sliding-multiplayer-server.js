@@ -799,6 +799,8 @@ app.get("/api/progress/rewards", requireAuth, async (req, res) => {
 
     res.json({
       level: progress.level,
+      exp: progress.exp,
+      requiredExp: progress.level >= MAX_LEVEL ? 0 : getLevelRequiredExp(progress.level),
       claimedLevel,
       maxLevel: MAX_LEVEL,
       rewards
