@@ -1190,6 +1190,175 @@ app.get("/api/ranking/weekly/me", requireAuth, async (req, res) => {
 });
 
 /* =========================================================
+   프로필 통계 / 닉네임 변경
+========================================================= */
+
+const NICKNAME_CHANGE_COST = 100;
+const NICKNAME_CHANGE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+async function selectProfileRow(accountId) {
+  const rows = await supabaseRequest("accounts", {
+    query:
+      `?select=id,nickname,play_count,play_seconds,mp_wins,mp_losses,nickname_changed_at` +
+      `&id=eq.${escapeSupabaseValue(accountId)}&limit=1`
+  });
+  return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+
+function getNextNicknameChangeAt(row) {
+  if (!row?.nickname_changed_at) return null;
+  const changed = new Date(row.nickname_changed_at).getTime();
+  if (!Number.isFinite(changed)) return null;
+  return new Date(changed + NICKNAME_CHANGE_COOLDOWN_MS);
+}
+
+function buildProfilePayload(row) {
+  const wins = Math.max(0, Number(row.mp_wins) || 0);
+  const losses = Math.max(0, Number(row.mp_losses) || 0);
+  const decided = wins + losses;
+  const next = getNextNicknameChangeAt(row);
+
+  return {
+    nickname: row.nickname,
+    playCount: Math.max(0, Number(row.play_count) || 0),
+    playSeconds: Math.max(0, Number(row.play_seconds) || 0),
+    mpWins: wins,
+    mpLosses: losses,
+    winRate: decided > 0 ? Math.round((wins / decided) * 1000) / 10 : null,
+    nicknameChangeCost: NICKNAME_CHANGE_COST,
+    nicknameChangedAt: row.nickname_changed_at || null,
+    nextNicknameChangeAt: next && next.getTime() > Date.now() ? next.toISOString() : null
+  };
+}
+
+async function isNicknameTaken(nickname, exceptAccountId) {
+  const rows = await supabaseRequest("accounts", {
+    query:
+      `?select=id,nickname&nickname=ilike.${escapeSupabaseValue(nickname)}&limit=10`
+  });
+  const target = normalizeNickname(nickname);
+  return (Array.isArray(rows) ? rows : []).some(
+    row =>
+      normalizeNickname(row.nickname) === target &&
+      String(row.id) !== String(exceptAccountId)
+  );
+}
+
+function formatRemainKo(ms) {
+  const total = Math.max(1, Math.ceil(ms / 60000));
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return h > 0 ? `${h}시간 ${m}분` : `${m}분`;
+}
+
+app.get("/api/profile/stats", requireAuth, async (req, res) => {
+  try {
+    const row = await selectProfileRow(req.account.id);
+    if (!row) return res.status(404).json({ error: "계정을 찾을 수 없습니다." });
+    res.json(buildProfilePayload(row));
+  } catch (error) {
+    console.error("[PROFILE] stats failed", error);
+    res.status(500).json({ error: "내 정보를 불러오지 못했습니다." });
+  }
+});
+
+// 게임 1회가 끝날 때 클라이언트가 호출합니다.
+// body: { mode: "solo" | "multiplayer", result: "win" | "loss" | "draw", seconds }
+app.post("/api/profile/record", requireAuth, async (req, res) => {
+  try {
+    const mode = req.body?.mode === "multiplayer" ? "multiplayer" : "solo";
+    const result = ["win", "loss", "draw"].includes(req.body?.result) ? req.body.result : null;
+    const seconds = Math.max(0, Math.min(21600, Math.floor(Number(req.body?.seconds) || 0)));
+
+    const row = await selectProfileRow(req.account.id);
+    if (!row) return res.status(404).json({ error: "계정을 찾을 수 없습니다." });
+
+    const patch = {
+      play_count: (Number(row.play_count) || 0) + 1,
+      play_seconds: (Number(row.play_seconds) || 0) + seconds
+    };
+
+    // 무승부(연결 끊김 등)는 도전 횟수에만 반영하고 승/패에는 넣지 않습니다.
+    if (mode === "multiplayer") {
+      if (result === "win") patch.mp_wins = (Number(row.mp_wins) || 0) + 1;
+      else if (result === "loss") patch.mp_losses = (Number(row.mp_losses) || 0) + 1;
+    }
+
+    await supabaseRequest("accounts", {
+      method: "PATCH",
+      query: `?id=eq.${escapeSupabaseValue(req.account.id)}`,
+      headers: { Prefer: "return=minimal" },
+      body: patch
+    });
+
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("[PROFILE] record failed", error);
+    res.status(500).json({ error: "플레이 기록을 저장하지 못했습니다." });
+  }
+});
+
+app.post("/api/profile/nickname", requireAuth, async (req, res) => {
+  try {
+    const nickname = String(req.body?.nickname || "").trim();
+
+    if (!validNickname(nickname)) {
+      return res.status(400).json({ error: "닉네임은 2~16자로 입력해주세요." });
+    }
+
+    const row = await selectProfileRow(req.account.id);
+    if (!row) return res.status(404).json({ error: "계정을 찾을 수 없습니다." });
+
+    if (nickname === row.nickname) {
+      return res.status(400).json({ error: "현재 닉네임과 같습니다." });
+    }
+
+    const next = getNextNicknameChangeAt(row);
+    if (next && next.getTime() > Date.now()) {
+      return res.status(429).json({
+        error: `닉네임은 24시간에 한 번만 바꿀 수 있습니다. (${formatRemainKo(next.getTime() - Date.now())} 후 가능)`,
+        nextNicknameChangeAt: next.toISOString()
+      });
+    }
+
+    if (await isNicknameTaken(nickname, req.account.id)) {
+      return res.status(409).json({ error: "이미 사용 중인 닉네임입니다." });
+    }
+
+    const nowIso = new Date().toISOString();
+
+    // 동시에 두 번 요청해도 한 번만 바뀌도록, 읽은 값과 같을 때만 갱신합니다.
+    const guard = row.nickname_changed_at
+      ? `nickname_changed_at=eq.${encodeURIComponent(row.nickname_changed_at)}`
+      : "nickname_changed_at=is.null";
+
+    const updated = await supabaseRequest("accounts", {
+      method: "PATCH",
+      query: `?id=eq.${escapeSupabaseValue(req.account.id)}&${guard}&select=id,nickname`,
+      headers: { Prefer: "return=representation" },
+      body: { nickname, nickname_changed_at: nowIso }
+    });
+
+    if (!Array.isArray(updated) || !updated.length) {
+      return res.status(409).json({ error: "이미 변경 요청이 처리되었습니다. 다시 확인해 주세요." });
+    }
+
+    res.json({
+      ok: true,
+      nickname: updated[0].nickname,
+      nicknameChangedAt: nowIso,
+      nextNicknameChangeAt: new Date(Date.now() + NICKNAME_CHANGE_COOLDOWN_MS).toISOString()
+    });
+  } catch (error) {
+    console.error("[PROFILE] nickname failed", error);
+    if (error?.supabase?.code === "23505") {
+      return res.status(409).json({ error: "이미 사용 중인 닉네임입니다." });
+    }
+    res.status(500).json({ error: "닉네임을 변경하지 못했습니다." });
+  }
+});
+
+/* =========================================================
    Static files / fallback
 
    Express 5 does not accept app.get("*") because path-to-regexp
