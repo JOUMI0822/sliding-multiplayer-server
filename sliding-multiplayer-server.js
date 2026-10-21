@@ -773,6 +773,42 @@ app.post("/api/progress/claim-rewards", requireAuth, async (req, res) => {
   }
 });
 
+/* =========================================================
+   레벨 보상표 조회 (Lv.2 ~ Lv.100)
+   - 프로필 박스를 눌렀을 때 클라이언트가 호출합니다.
+   - 보상 규칙은 서버(getLevelReward)에만 두고 결과만 내려줍니다.
+========================================================= */
+app.get("/api/progress/rewards", requireAuth, async (req, res) => {
+  try {
+    const rows = await supabaseRequest("accounts", {
+      query: `?select=id,level,exp,claimed_level&id=eq.${escapeSupabaseValue(req.account.id)}&limit=1`
+    });
+
+    const row = Array.isArray(rows) && rows.length ? rows[0] : null;
+    if (!row) {
+      return res.status(404).json({ error: "계정을 찾을 수 없습니다." });
+    }
+
+    const progress = normalizeAccountProgress(row.level, row.exp);
+    const claimedLevel = Math.max(1, Math.floor(Number(row.claimed_level) || 1));
+
+    const rewards = [];
+    for (let lv = 2; lv <= MAX_LEVEL; lv++) {
+      rewards.push(getLevelReward(lv));
+    }
+
+    res.json({
+      level: progress.level,
+      claimedLevel,
+      maxLevel: MAX_LEVEL,
+      rewards
+    });
+  } catch (error) {
+    console.error("[REWARD] list failed", error);
+    res.status(500).json({ error: "레벨 보상표를 불러오지 못했습니다." });
+  }
+});
+
 app.get("/api/progress", requireAuth, async (req, res) => {
   try {
     const progress = await selectAccountProgress(req.account.id);
