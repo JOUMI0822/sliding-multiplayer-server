@@ -593,7 +593,7 @@ app.post("/api/register", async (req, res) => {
 ========================================================= */
 
 const guestCreateLog = new Map();
-const GUEST_CREATE_LIMIT = 10;
+const GUEST_CREATE_LIMIT = 500;
 const GUEST_CREATE_WINDOW_MS = 60 * 60 * 1000;
 
 function getClientIp(req) {
@@ -621,8 +621,76 @@ function allowGuestCreate(ip) {
   return true;
 }
 
+async function findExactNicknameAccount(nickname) {
+  const rows = await supabaseRequest("accounts", {
+    query: `?select=id,nickname&nickname=ilike.${escapeSupabaseValue(nickname)}&limit=10`
+  });
+  const target = normalizeNickname(nickname);
+  return (Array.isArray(rows) ? rows : []).find(
+    row => normalizeNickname(row.nickname) === target
+  ) || null;
+}
+
+function guestLoginResponse(account) {
+  return {
+    ok: true,
+    user: { id: account.id, nickname: account.nickname, guest: true },
+    sessionToken: createSessionToken(account.id)
+  };
+}
+
 app.post("/api/guest", async (req, res) => {
   try {
+    const requested = String(req.body?.nickname || "").trim();
+
+    /* ---- 이름을 지정한 경우: 같은 이름의 게스트 계정을 재사용하거나 새로 만듭니다 ---- */
+    if (requested) {
+      if (!validNickname(requested)) {
+        return res.status(400).json({ error: "이름은 2~16자로 입력해주세요." });
+      }
+
+      const found = await findExactNicknameAccount(requested);
+      if (found) {
+        if (String(found.id).startsWith("guest_")) {
+          return res.json(guestLoginResponse(found));   // 같은 이름 = 같은 사람으로 보고 이어서
+        }
+        return res.status(409).json({ error: "회원이 사용 중인 이름이에요. 다른 이름을 입력해 주세요." });
+      }
+
+      if (!allowGuestCreate(getClientIp(req))) {
+        return res.status(429).json({ error: "잠시 후 다시 시도해 주세요." });
+      }
+
+      try {
+        const rows = await supabaseRequest("accounts", {
+          method: "POST",
+          query: "?select=id,nickname,created_at",
+          headers: { Prefer: "return=representation" },
+          body: {
+            id: `guest_${crypto.randomBytes(8).toString("hex")}`,
+            nickname: requested,
+            password_hash: JSON.stringify(
+              hashPassword(crypto.randomBytes(24).toString("hex"))
+            )
+          }
+        });
+        const account = Array.isArray(rows) ? rows[0] : rows;
+        if (!account?.id) throw new Error("게스트 계정 저장 결과를 확인하지 못했습니다.");
+        return res.json(guestLoginResponse(account));
+      } catch (error) {
+        // 동시에 같은 이름이 만들어진 경우
+        if (error?.supabase?.code === "23505") {
+          const again = await findExactNicknameAccount(requested);
+          if (again && String(again.id).startsWith("guest_")) {
+            return res.json(guestLoginResponse(again));
+          }
+          return res.status(409).json({ error: "이미 사용 중인 이름이에요." });
+        }
+        throw error;
+      }
+    }
+
+    /* ---- 이름이 없으면 기존처럼 랜덤 게스트 ---- */
     if (!allowGuestCreate(getClientIp(req))) {
       return res.status(429).json({ error: "잠시 후 다시 시도해 주세요." });
     }
@@ -651,7 +719,6 @@ app.post("/api/guest", async (req, res) => {
         });
         account = Array.isArray(rows) ? rows[0] : rows;
       } catch (error) {
-        // 닉네임 중복(unique violation)이면 다른 번호로 다시 시도
         if (error?.supabase?.code === "23505") continue;
         throw error;
       }
@@ -661,11 +728,7 @@ app.post("/api/guest", async (req, res) => {
       return res.status(503).json({ error: "게스트 계정을 만들지 못했습니다. 다시 시도해 주세요." });
     }
 
-    res.json({
-      ok: true,
-      user: { id: account.id, nickname: account.nickname, guest: true },
-      sessionToken: createSessionToken(account.id)
-    });
+    res.json(guestLoginResponse(account));
   } catch (error) {
     console.error("GUEST CREATE ERROR:", error);
     res.status(500).json({ error: "게스트 계정을 만들지 못했습니다." });
