@@ -388,6 +388,27 @@ async function requireAuth(req, res, next) {
   }
 }
 
+// 로그인하지 않아도(토큰이 없거나 만료돼도) 통과시키는 인증.
+// 랭킹 조회처럼 누구나 볼 수 있지만, 로그인 상태면 "내 순위"도 알려주는 API에 사용합니다.
+async function optionalAuth(req, res, next) {
+  try {
+    const session = getSessionPayload(req);
+    if (session) {
+      const account = await selectOneAccountById(session.accountId);
+      if (account) {
+        req.session = session;
+        req.account = account;
+      }
+    }
+  } catch (error) {
+    console.warn("OPTIONAL AUTH ERROR:", error?.message || error);
+  }
+
+  // 비로그인 조회자: 어떤 랭킹 행과도 일치하지 않는 빈 id를 사용합니다.
+  if (!req.account) req.account = { id: "" };
+  next();
+}
+
 /* =========================================================
    Korea/Seoul date helpers
 
@@ -488,6 +509,13 @@ app.post("/api/register", async (req, res) => {
         .json({ error: "아이디는 영문/숫자/_ 3~24자로 입력해주세요." });
     }
 
+    // guest_ 로 시작하는 아이디는 게스트 계정 전용입니다.
+    if (id.startsWith("guest_")) {
+      return res
+        .status(400)
+        .json({ error: "guest_ 로 시작하는 아이디는 사용할 수 없습니다." });
+    }
+
     if (password.length < 8 || password.length > 72) {
       return res
         .status(400)
@@ -552,6 +580,95 @@ app.post("/api/register", async (req, res) => {
     return res.status(500).json({
       error: "회원가입 저장 중 오류가 발생했습니다."
     });
+  }
+});
+
+/* =========================================================
+   Guest account
+
+   게스트도 랭킹에 기록이 올라갈 수 있도록, 브라우저마다 게스트 계정을
+   하나씩 만들어 줍니다. (id: guest_xxxxxxxx / 닉네임: 게스트1234)
+   - 비밀번호는 아무도 모르는 랜덤 값이라 로그인 화면으로는 접근할 수 없습니다.
+   - 클라이언트는 받은 sessionToken을 localStorage에 저장해 재사용합니다.
+========================================================= */
+
+const guestCreateLog = new Map();
+const GUEST_CREATE_LIMIT = 10;
+const GUEST_CREATE_WINDOW_MS = 60 * 60 * 1000;
+
+function getClientIp(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  return forwarded || req.socket?.remoteAddress || "unknown";
+}
+
+function allowGuestCreate(ip) {
+  const now = Date.now();
+  const recent = (guestCreateLog.get(ip) || []).filter(t => now - t < GUEST_CREATE_WINDOW_MS);
+
+  if (recent.length >= GUEST_CREATE_LIMIT) {
+    guestCreateLog.set(ip, recent);
+    return false;
+  }
+
+  recent.push(now);
+  guestCreateLog.set(ip, recent);
+
+  if (guestCreateLog.size > 5000) {
+    for (const [key, times] of guestCreateLog) {
+      if (!times.some(t => now - t < GUEST_CREATE_WINDOW_MS)) guestCreateLog.delete(key);
+    }
+  }
+  return true;
+}
+
+app.post("/api/guest", async (req, res) => {
+  try {
+    if (!allowGuestCreate(getClientIp(req))) {
+      return res.status(429).json({ error: "잠시 후 다시 시도해 주세요." });
+    }
+
+    let account = null;
+
+    for (let attempt = 0; attempt < 8 && !account; attempt++) {
+      const id = `guest_${crypto.randomBytes(8).toString("hex")}`;
+      const digits = attempt < 5 ? 4 : 6;
+      const nickname = `게스트${crypto.randomInt(10 ** (digits - 1), 10 ** digits)}`;
+
+      if (await selectAccountByNickname(nickname)) continue;
+
+      try {
+        const rows = await supabaseRequest("accounts", {
+          method: "POST",
+          query: "?select=id,nickname,created_at",
+          headers: { Prefer: "return=representation" },
+          body: {
+            id,
+            nickname,
+            password_hash: JSON.stringify(
+              hashPassword(crypto.randomBytes(24).toString("hex"))
+            )
+          }
+        });
+        account = Array.isArray(rows) ? rows[0] : rows;
+      } catch (error) {
+        // 닉네임 중복(unique violation)이면 다른 번호로 다시 시도
+        if (error?.supabase?.code === "23505") continue;
+        throw error;
+      }
+    }
+
+    if (!account?.id) {
+      return res.status(503).json({ error: "게스트 계정을 만들지 못했습니다. 다시 시도해 주세요." });
+    }
+
+    res.json({
+      ok: true,
+      user: { id: account.id, nickname: account.nickname, guest: true },
+      sessionToken: createSessionToken(account.id)
+    });
+  } catch (error) {
+    console.error("GUEST CREATE ERROR:", error);
+    res.status(500).json({ error: "게스트 계정을 만들지 못했습니다." });
   }
 });
 
@@ -628,6 +745,7 @@ app.get("/api/me", requireAuth, async (req, res) => {
     res.json({
       id: req.account.id,
       nickname: req.account.nickname,
+      guest: String(req.account.id).startsWith("guest_"),
       level: progress?.level ?? 1,
       exp: progress?.exp ?? 0
     });
@@ -636,6 +754,7 @@ app.get("/api/me", requireAuth, async (req, res) => {
     res.json({
       id: req.account.id,
       nickname: req.account.nickname,
+      guest: String(req.account.id).startsWith("guest_"),
       level: 1,
       exp: 0
     });
@@ -1097,7 +1216,7 @@ function publicRanking(rows, accountId) {
    Today ranking
 ========================================================= */
 
-app.get("/api/ranking/today", requireAuth, async (req, res) => {
+app.get("/api/ranking/today", optionalAuth, async (req, res) => {
   try {
     const rows = await buildRanking("daily");
     const mineIndex = rows.findIndex(
@@ -1122,7 +1241,7 @@ app.get("/api/ranking/today", requireAuth, async (req, res) => {
    Weekly ranking
 ========================================================= */
 
-app.get("/api/ranking/weekly", requireAuth, async (req, res) => {
+app.get("/api/ranking/weekly", optionalAuth, async (req, res) => {
   try {
     const rows = await buildRanking("weekly");
     const mineIndex = rows.findIndex(
