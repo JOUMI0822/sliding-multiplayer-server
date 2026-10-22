@@ -1934,6 +1934,15 @@ wss.on("connection", ws => {
       return;
     }
 
+    /* ---------- 포기 (경기 중 언제든 가능) ---------- */
+    if (data.type === "forfeit") {
+      if (room.over || !room.started) return;
+      const winner = state.role === "host" ? "guest" : "host";
+      console.log("[ROUND]", JSON.stringify({ ev: "forfeit", room: room.room, role: state.role }));
+      endMatch(room, winner, "forfeit");
+      return;
+    }
+
     /* ---------- 라운드 시작 (방장 전용) ---------- */
     if (data.type === "matchStart") {
       if (state.role !== "host") return;
