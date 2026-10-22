@@ -1376,12 +1376,15 @@ app.get("/api/ranking/weekly/me", requireAuth, async (req, res) => {
 ========================================================= */
 
 const NICKNAME_CHANGE_COST = 100;
+const RECORD_RESET_COST = 100;
 const NICKNAME_CHANGE_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 async function selectProfileRow(accountId) {
   const rows = await supabaseRequest("accounts", {
     query:
-      `?select=id,nickname,play_count,play_seconds,mp_wins,mp_losses,nickname_changed_at` +
+      `?select=id,nickname,play_count,play_seconds,mp_wins,mp_losses,nickname_changed_at,` +
+      `solo_games,solo_score_total,solo_clears_total,solo_streak_total,` +
+      `mp_games,mp_seconds,mp_score_total,mp_clears_total,mp_streak_total` +
       `&id=eq.${escapeSupabaseValue(accountId)}&limit=1`
   });
   return Array.isArray(rows) && rows.length ? rows[0] : null;
@@ -1392,6 +1395,12 @@ function getNextNicknameChangeAt(row) {
   const changed = new Date(row.nickname_changed_at).getTime();
   if (!Number.isFinite(changed)) return null;
   return new Date(changed + NICKNAME_CHANGE_COOLDOWN_MS);
+}
+
+function avgOf(total, games) {
+  const g = Math.max(0, Number(games) || 0);
+  if (g <= 0) return null;
+  return Math.round((Math.max(0, Number(total) || 0) / g) * 10) / 10;
 }
 
 function buildProfilePayload(row) {
@@ -1406,6 +1415,15 @@ function buildProfilePayload(row) {
     playSeconds: Math.max(0, Number(row.play_seconds) || 0),
     mpWins: wins,
     mpLosses: losses,
+    mpGames: Math.max(0, Number(row.mp_games) || 0),
+    mpSeconds: Math.max(0, Number(row.mp_seconds) || 0),
+    soloAvgScore: avgOf(row.solo_score_total, row.solo_games),
+    soloAvgClears: avgOf(row.solo_clears_total, row.solo_games),
+    soloAvgStreak: avgOf(row.solo_streak_total, row.solo_games),
+    mpAvgScore: avgOf(row.mp_score_total, row.mp_games),
+    mpAvgClears: avgOf(row.mp_clears_total, row.mp_games),
+    mpAvgStreak: avgOf(row.mp_streak_total, row.mp_games),
+    recordResetCost: RECORD_RESET_COST,
     winRate: decided > 0 ? Math.round((wins / decided) * 1000) / 10 : null,
     nicknameChangeCost: NICKNAME_CHANGE_COST,
     nicknameChangedAt: row.nickname_changed_at || null,
@@ -1455,15 +1473,33 @@ app.post("/api/profile/record", requireAuth, async (req, res) => {
     const row = await selectProfileRow(req.account.id);
     if (!row) return res.status(404).json({ error: "계정을 찾을 수 없습니다." });
 
-    const patch = {
-      play_count: (Number(row.play_count) || 0) + 1,
-      play_seconds: (Number(row.play_seconds) || 0) + seconds
-    };
+    // 점수/클리어/연속 클리어는 서버가 같은 공식으로 다시 계산합니다.
+    const stat = parseScoreBody(req.body);
+    const patch = {};
 
-    // 무승부(연결 끊김 등)는 도전 횟수에만 반영하고 승/패에는 넣지 않습니다.
     if (mode === "multiplayer") {
+      patch.mp_seconds = (Number(row.mp_seconds) || 0) + seconds;
+
+      if (stat) {
+        patch.mp_games = (Number(row.mp_games) || 0) + 1;
+        patch.mp_score_total = (Number(row.mp_score_total) || 0) + stat.score;
+        patch.mp_clears_total = (Number(row.mp_clears_total) || 0) + stat.clears;
+        patch.mp_streak_total = (Number(row.mp_streak_total) || 0) + stat.max_streak;
+      }
+
+      // 무승부(연결 끊김 등)는 승/패에 넣지 않습니다.
       if (result === "win") patch.mp_wins = (Number(row.mp_wins) || 0) + 1;
       else if (result === "loss") patch.mp_losses = (Number(row.mp_losses) || 0) + 1;
+    } else {
+      patch.play_count = (Number(row.play_count) || 0) + 1;
+      patch.play_seconds = (Number(row.play_seconds) || 0) + seconds;
+
+      if (stat) {
+        patch.solo_games = (Number(row.solo_games) || 0) + 1;
+        patch.solo_score_total = (Number(row.solo_score_total) || 0) + stat.score;
+        patch.solo_clears_total = (Number(row.solo_clears_total) || 0) + stat.clears;
+        patch.solo_streak_total = (Number(row.solo_streak_total) || 0) + stat.max_streak;
+      }
     }
 
     await supabaseRequest("accounts", {
@@ -1477,6 +1513,56 @@ app.post("/api/profile/record", requireAuth, async (req, res) => {
   } catch (error) {
     console.error("[PROFILE] record failed", error);
     res.status(500).json({ error: "플레이 기록을 저장하지 못했습니다." });
+  }
+});
+
+// 기록 초기화 (개인 도전 / 2인 대전을 각각 따로). 코인 100 차감은 클라이언트(코인 저장소)가 담당합니다.
+// body: { scope: "solo" | "multiplayer" }
+app.post("/api/profile/reset", requireAuth, async (req, res) => {
+  try {
+    const scope = req.body?.scope;
+
+    if (scope !== "solo" && scope !== "multiplayer") {
+      return res.status(400).json({ error: "초기화할 기록을 선택해주세요." });
+    }
+
+    if (String(req.account.id).startsWith("guest_")) {
+      return res.status(403).json({ error: "게스트는 기록을 초기화할 수 없습니다." });
+    }
+
+    const patch = scope === "solo"
+      ? {
+          play_count: 0,
+          play_seconds: 0,
+          solo_games: 0,
+          solo_score_total: 0,
+          solo_clears_total: 0,
+          solo_streak_total: 0
+        }
+      : {
+          mp_wins: 0,
+          mp_losses: 0,
+          mp_games: 0,
+          mp_seconds: 0,
+          mp_score_total: 0,
+          mp_clears_total: 0,
+          mp_streak_total: 0
+        };
+
+    await supabaseRequest("accounts", {
+      method: "PATCH",
+      query: `?id=eq.${escapeSupabaseValue(req.account.id)}`,
+      headers: { Prefer: "return=minimal" },
+      body: patch
+    });
+
+    const row = await selectProfileRow(req.account.id);
+    if (!row) return res.status(404).json({ error: "계정을 찾을 수 없습니다." });
+
+    res.json({ ok: true, scope, cost: RECORD_RESET_COST, profile: buildProfilePayload(row) });
+  } catch (error) {
+    console.error("[PROFILE] reset failed", error);
+    res.status(500).json({ error: "기록을 초기화하지 못했습니다." });
   }
 });
 
